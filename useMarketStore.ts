@@ -9,16 +9,44 @@ type OIBar = {
   openInterest: number
 }
 
+type KlineBar = {
+  time: string | number
+  open: number
+  high: number
+  low: number
+  close: number
+}
+
+type VWAPBar = {
+  time: string | number
+  value: number
+}
+
+type StoredSetup = {
+  id: string
+  timestamp: number
+  marketState: string
+  signal: 'long' | 'short'
+  score: number
+  entryPrice: number
+  stopLoss: number
+  takeProfit: number
+}
+
 type MarketStore = {
   cvd: CvdBar[]
   oi: OIBar[]
-  setupHistory: any[]
+  klines: KlineBar[]
+  vwap: VWAPBar[]
+  setupHistory: StoredSetup[]
 }
 
 export function useMarketStore(): MarketStore {
   return {
     cvd: [],
     oi: [],
+    klines: [],
+    vwap: [],
     setupHistory: [],
   }
 }
