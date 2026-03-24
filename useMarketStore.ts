@@ -39,6 +39,8 @@ type MarketStore = {
   klines: KlineBar[]
   vwap: VWAPBar[]
   setupHistory: StoredSetup[]
+  error: string | null
+  isLoading: boolean
 }
 
 export function useMarketStore(): MarketStore {
@@ -48,5 +50,7 @@ export function useMarketStore(): MarketStore {
     klines: [],
     vwap: [],
     setupHistory: [],
+    error: null,
+    isLoading: false,
   }
 }
