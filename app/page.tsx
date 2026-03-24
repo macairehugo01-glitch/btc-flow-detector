@@ -1,5 +1,5 @@
 import { Header } from '../index'
-import StatsBar from './StatsBar'
+import StatsBar from '../StatsBar'
 import { CVDChart } from '../CVDChart'
 import { OIChart } from '../SettingsPanel'
 import { PriceChart } from '../SignalPanel'
