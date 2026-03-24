@@ -34,7 +34,7 @@ export default function Page() {
           </div>
         )}
 
-        <StatsBar />
+      <div>Stats Bar</div>
 
         {/* Main layout */}
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 340px', gap: 16, alignItems: 'start' }}>
