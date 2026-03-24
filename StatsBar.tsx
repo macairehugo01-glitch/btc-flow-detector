@@ -1,5 +1,5 @@
 'use client'
-import useMarketData from './useMarketData'
+import { useMarketData } from './useMarketData'
 import { useMarketStore } from './useMarketStore'
 import { Header } from './Header'
 import { PriceChart } from './SignalPanel'
