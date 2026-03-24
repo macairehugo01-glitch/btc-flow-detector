@@ -1,6 +1,16 @@
 'use client'
 import { useMarketStore } from './useMarketStore'
-import type { StoredSetup } from '@/types'
+
+type StoredSetup = {
+  id: string
+  timestamp: number
+  marketState: string
+  signal: 'long' | 'short'
+  score: number
+  entryPrice: number
+  stopLoss: number
+  takeProfit: number
+}
 
 const STATE_SHORT: Record<string, string> = {
   majority_trap_short: 'Trap Short',
