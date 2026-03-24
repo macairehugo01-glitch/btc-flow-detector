@@ -50,9 +50,9 @@ export default function Page() {
 
           {/* Right — panels */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <SignalPanel />
+            <div>Signal Panel</div>
             <OIStatsPanel />
-            <ConditionsChecklist />
+            <div>Conditions Checklist</div>
             <SettingsPanel />
           </div>
         </div>
