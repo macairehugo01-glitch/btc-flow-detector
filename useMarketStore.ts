@@ -1,3 +1,5 @@
+type Timeframe = '1m' | '5m' | '15m' | '1h'
+
 type CvdBar = {
   time: string | number
   cvd: number
@@ -33,6 +35,10 @@ type StoredSetup = {
   takeProfit: number
 }
 
+type Thresholds = {
+  mode?: string
+}
+
 type MarketStore = {
   cvd: CvdBar[]
   oi: OIBar[]
@@ -41,6 +47,12 @@ type MarketStore = {
   setupHistory: StoredSetup[]
   error: string | null
   isLoading: boolean
+  ticker: { price: number; change24h: number; volume24h: number } | null
+  timeframe: Timeframe
+  isConnected: boolean
+  thresholds: Thresholds
+  setTimeframe: (tf: Timeframe) => void
+  setThresholds: (t: Partial<Thresholds>) => void
 }
 
 export function useMarketStore(): MarketStore {
@@ -52,5 +64,11 @@ export function useMarketStore(): MarketStore {
     setupHistory: [],
     error: null,
     isLoading: false,
+    ticker: null,
+    timeframe: '5m',
+    isConnected: false,
+    thresholds: {},
+    setTimeframe: () => {},
+    setThresholds: () => {},
   }
 }
