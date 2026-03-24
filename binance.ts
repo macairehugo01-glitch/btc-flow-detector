@@ -125,18 +125,14 @@ export async function fetchAggTrades(limit: number): Promise<AggTrade[]> {
 }
 
 /**
- * OKX fournit un endpoint public d'open interest snapshot.
- * Pour garder ton UI compatible, on reconstruit une série plate
- * de longueur "limit" avec la même valeur d'OI et des timestamps récents.
+ * Snapshot OI current
  */
-export async function fetchOIHistory(period: string, limit: number): Promise<OIBar[]> {
+export async function fetchCurrentOI(): Promise<OIBar> {
   const data = await httpJson<
     OkxResponse<{
       instId: string
       instType: string
       oi: string
-      oiCcy?: string
-      oiUsd?: string
       ts: string
     }>
   >(
@@ -148,20 +144,23 @@ export async function fetchOIHistory(period: string, limit: number): Promise<OIB
   }
 
   const item = data.data[0]
-  const oi = Number(item.oi)
-  const endTs = Math.floor(Number(item.ts) / 1000)
 
-  let step = 300
-  if (period === '15m') step = 900
-  if (period === '1h') step = 3600
+  return {
+    time: Math.floor(Number(item.ts) / 1000),
+    openInterest: Number(item.oi),
+  }
+}
 
-  return Array.from({ length: limit }, (_, i) => {
-    const indexFromEnd = limit - 1 - i
-    return {
-      time: endTs - indexFromEnd * step,
-      openInterest: oi,
-    }
-  })
+/**
+ * Compat ancienne signature.
+ * On retourne juste un snapshot répété si tu l'appelles encore ailleurs.
+ */
+export async function fetchOIHistory(_period: string, limit: number): Promise<OIBar[]> {
+  const current = await fetchCurrentOI()
+  return Array.from({ length: limit }, (_, i) => ({
+    time: current.time - (limit - 1 - i) * 300,
+    openInterest: current.openInterest,
+  }))
 }
 
 export async function fetchTicker(): Promise<TickerData> {
