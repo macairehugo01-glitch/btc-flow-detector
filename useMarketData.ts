@@ -34,8 +34,15 @@ export function useMarketData() {
         ticker: data.ticker ?? null,
         funding: data.funding ?? null,
         signal: data.signal ?? null,
-        lastUpdate: data.lastUpdate ?? Date.now(),
         setupHistory: data.setupHistory ?? [],
+        setupStats: data.setupStats ?? {
+          total: 0,
+          wins: 0,
+          losses: 0,
+          open: 0,
+          winrate: 0,
+        },
+        lastUpdate: data.lastUpdate ?? Date.now(),
       })
 
       setConnected(true)
