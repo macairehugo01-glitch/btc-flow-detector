@@ -1,5 +1,5 @@
 'use client'
-import { useMarketStore } from './store/useMarketStore'
+import { useMarketStore } from './useMarketStore'
 import type { StoredSetup } from '@/types'
 
 const STATE_SHORT: Record<string, string> = {
