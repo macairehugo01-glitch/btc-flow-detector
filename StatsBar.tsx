@@ -1,4 +1,5 @@
 'use client'
+import { MiniStatsBar } from './MiniStatsBar'
 import { useMarketData } from './useMarketData'
 import { useMarketStore } from './useMarketStore'
 import { Header } from './Header'
