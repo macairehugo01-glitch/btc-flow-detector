@@ -71,21 +71,6 @@ function mapTimeframeToOkx(tf: string): string {
   }
 }
 
-function mapPeriodToOkx(tf: string): string {
-  switch (tf) {
-    case '1m':
-      return '5m'
-    case '5m':
-      return '5m'
-    case '15m':
-      return '15m'
-    case '1h':
-      return '1H'
-    default:
-      return '5m'
-  }
-}
-
 export async function fetchKlines(timeframe: string, limit: number): Promise<Kline[]> {
   const bar = mapTimeframeToOkx(timeframe)
 
@@ -112,14 +97,16 @@ export async function fetchKlines(timeframe: string, limit: number): Promise<Kli
 export async function fetchAggTrades(limit: number): Promise<AggTrade[]> {
   const capped = Math.min(Math.max(limit, 1), 100)
 
-  const data = await httpJson<OkxResponse<{
-    instId: string
-    tradeId: string
-    px: string
-    sz: string
-    side: 'buy' | 'sell'
-    ts: string
-  }>>(
+  const data = await httpJson<
+    OkxResponse<{
+      instId: string
+      tradeId: string
+      px: string
+      sz: string
+      side: 'buy' | 'sell'
+      ts: string
+    }>
+  >(
     `${OKX_BASE}/api/v5/market/trades?instId=BTC-USDT-SWAP&limit=${capped}`
   )
 
@@ -137,39 +124,57 @@ export async function fetchAggTrades(limit: number): Promise<AggTrade[]> {
     }))
 }
 
+/**
+ * OKX fournit un endpoint public d'open interest snapshot.
+ * Pour garder ton UI compatible, on reconstruit une série plate
+ * de longueur "limit" avec la même valeur d'OI et des timestamps récents.
+ */
 export async function fetchOIHistory(period: string, limit: number): Promise<OIBar[]> {
-  const bar = mapPeriodToOkx(period)
-  const capped = Math.min(Math.max(limit, 1), 100)
-
-  const data = await httpJson<OkxResponse<{
-    oi: string
-    oiCcy?: string
-    ts: string
-  }>>(
-    `${OKX_BASE}/api/v5/public/open-interest-history?instId=BTC-USDT-SWAP&period=${encodeURIComponent(bar)}&limit=${capped}`
+  const data = await httpJson<
+    OkxResponse<{
+      instId: string
+      instType: string
+      oi: string
+      oiCcy?: string
+      oiUsd?: string
+      ts: string
+    }>
+  >(
+    `${OKX_BASE}/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP`
   )
 
-  if (data.code !== '0') {
-    throw new Error(`OKX open interest history error: ${data.msg}`)
+  if (data.code !== '0' || !data.data.length) {
+    throw new Error(`OKX open interest error: ${data.msg}`)
   }
 
-  return [...data.data]
-    .reverse()
-    .map((item) => ({
-      time: Math.floor(Number(item.ts) / 1000),
-      openInterest: Number(item.oi),
-    }))
+  const item = data.data[0]
+  const oi = Number(item.oi)
+  const endTs = Math.floor(Number(item.ts) / 1000)
+
+  let step = 300
+  if (period === '15m') step = 900
+  if (period === '1h') step = 3600
+
+  return Array.from({ length: limit }, (_, i) => {
+    const indexFromEnd = limit - 1 - i
+    return {
+      time: endTs - indexFromEnd * step,
+      openInterest: oi,
+    }
+  })
 }
 
 export async function fetchTicker(): Promise<TickerData> {
   try {
-    const data = await httpJson<OkxResponse<{
-      instId: string
-      last: string
-      vol24h: string
-      sodUtc0?: string
-      open24h?: string
-    }>>(
+    const data = await httpJson<
+      OkxResponse<{
+        instId: string
+        last: string
+        vol24h: string
+        open24h?: string
+        sodUtc0?: string
+      }>
+    >(
       `${OKX_BASE}/api/v5/market/ticker?instId=BTC-USDT-SWAP`
     )
 
@@ -180,8 +185,7 @@ export async function fetchTicker(): Promise<TickerData> {
     const item = data.data[0]
     const last = Number(item.last)
     const open24h = Number(item.open24h ?? item.sodUtc0 ?? 0)
-    const change24h =
-      open24h > 0 ? ((last - open24h) / open24h) * 100 : 0
+    const change24h = open24h > 0 ? ((last - open24h) / open24h) * 100 : 0
 
     return {
       price: last,
@@ -189,11 +193,16 @@ export async function fetchTicker(): Promise<TickerData> {
       volume24h: Number(item.vol24h),
     }
   } catch {
-    const cg = await httpJson<Record<string, {
-      usd: number
-      usd_24h_change: number
-      usd_24h_vol: number
-    }>>(
+    const cg = await httpJson<
+      Record<
+        string,
+        {
+          usd: number
+          usd_24h_change: number
+          usd_24h_vol: number
+        }
+      >
+    >(
       `${COINGECKO_BASE}/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true`
     )
 
@@ -208,13 +217,14 @@ export async function fetchTicker(): Promise<TickerData> {
 }
 
 export async function fetchFundingRate(): Promise<FundingData> {
-  const data = await httpJson<OkxResponse<{
-    instId: string
-    fundingRate: string
-    fundingTime: string
-    nextFundingRate?: string
-    nextFundingTime?: string
-  }>>(
+  const data = await httpJson<
+    OkxResponse<{
+      instId: string
+      fundingRate: string
+      fundingTime: string
+      nextFundingTime?: string
+    }>
+  >(
     `${OKX_BASE}/api/v5/public/funding-rate-history?instId=BTC-USDT-SWAP&limit=1`
   )
 
