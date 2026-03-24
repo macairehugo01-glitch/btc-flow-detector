@@ -19,7 +19,7 @@ type KlineBar = {
 
 type VWAPBar = {
   time: string | number
-  value: number
+  vwap: number
 }
 
 type StoredSetup = {
