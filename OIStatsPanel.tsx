@@ -7,8 +7,18 @@ export default function OIStatsPanel() {
 
   const latest = oi.at(-1)
   const prev = oi.at(-2)
-  const oiChange =
+  const first = oi[0]
+
+  const lastStep =
     latest && prev ? latest.openInterest - prev.openInterest : 0
+
+  const sessionChange =
+    latest && first ? latest.openInterest - first.openInterest : 0
+
+  const sessionChangePct =
+    latest && first && first.openInterest !== 0
+      ? ((latest.openInterest - first.openInterest) / first.openInterest) * 100
+      : 0
 
   return (
     <div
@@ -34,13 +44,33 @@ export default function OIStatsPanel() {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div>Current OI: {latest ? latest.openInterest.toFixed(2) : '—'}</div>
+
         <div
           style={{
-            color: oiChange >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
+            color: lastStep >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
           }}
         >
-          OI Change: {oiChange.toFixed(2)}
+          Last OI Step: {lastStep.toFixed(2)}
         </div>
+
+        <div
+          style={{
+            color:
+              sessionChange >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
+          }}
+        >
+          Session OI Change: {sessionChange.toFixed(2)}
+        </div>
+
+        <div
+          style={{
+            color:
+              sessionChangePct >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
+          }}
+        >
+          Session OI %: {sessionChangePct.toFixed(4)}%
+        </div>
+
         <div>
           Funding: {funding ? `${(funding.rate * 100).toFixed(4)}%` : '—'}
         </div>
