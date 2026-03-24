@@ -1,3 +1,4 @@
+'use client'
 import { Header } from '../index'
 import StatsBar from '../StatsBar'
 import { CVDChart } from '../CVDChart'
