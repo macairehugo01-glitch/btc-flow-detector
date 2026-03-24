@@ -33,6 +33,7 @@ export type StoredSetup = {
   id: string
   timestamp: number
   session: 'Asia' | 'London' | 'New York'
+  timeframe: Timeframe
   action: 'BUY' | 'SELL'
   confidence: number
   entryPrice: number
@@ -44,6 +45,15 @@ export type StoredSetup = {
 }
 
 export type SetupStats = {
+  total: number
+  wins: number
+  losses: number
+  open: number
+  winrate: number
+}
+
+export type SessionStats = {
+  session: 'Asia' | 'London' | 'New York'
   total: number
   wins: number
   losses: number
@@ -75,6 +85,7 @@ type MarketDataPayload = {
   oi?: OIBar[]
   setupHistory?: StoredSetup[]
   setupStats?: SetupStats
+  sessionStats?: SessionStats[]
   ticker?: { price: number; change24h: number; volume24h: number } | null
   funding?: { rate: number; nextFundingTime: number } | null
   signal?: TradeSignal | null
@@ -88,6 +99,7 @@ type MarketStore = {
   oi: OIBar[]
   setupHistory: StoredSetup[]
   setupStats: SetupStats
+  sessionStats: SessionStats[]
 
   ticker: { price: number; change24h: number; volume24h: number } | null
   funding: { rate: number; nextFundingTime: number } | null
@@ -122,6 +134,7 @@ export const useMarketStore = create<MarketStore>((set) => ({
     open: 0,
     winrate: 0,
   },
+  sessionStats: [],
 
   ticker: null,
   funding: null,
