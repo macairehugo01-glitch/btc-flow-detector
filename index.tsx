@@ -44,47 +44,41 @@ export function Header({ onRefresh }: { onRefresh: () => void }) {
           flexWrap: 'wrap',
         }}
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-  <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-    <span
-      style={{
-        fontFamily: 'monospace',
-        fontWeight: 700,
-        letterSpacing: '0.2em',
-        fontSize: 22,
-      }}
-    >
-      BTC FLOW
-    </span>
-    <span
-      style={{
-        color: 'var(--text-muted)',
-        fontFamily: 'monospace',
-        fontSize: 12,
-      }}
-    >
-      DETECTOR
-    </span>
-  </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ color: 'var(--accent-red)', fontSize: 20 }}>•</span>
 
-  <span
-    style={{
-      color: 'var(--text-secondary)',
-      fontFamily: 'monospace',
-      fontSize: 11,
-      letterSpacing: '0.08em',
-    }}
-  >
-    by Hugo Macaire
-  </span>
-</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+              <span
+                style={{
+                  fontFamily: 'monospace',
+                  fontWeight: 700,
+                  letterSpacing: '0.2em',
+                  fontSize: 22,
+                }}
+              >
+                BTC FLOW
+              </span>
+              <span
+                style={{
+                  color: 'var(--text-muted)',
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                }}
+              >
+                DETECTOR
+              </span>
+            </div>
+
+            <span
               style={{
-                color: 'var(--text-muted)',
+                color: 'var(--text-secondary)',
                 fontFamily: 'monospace',
-                fontSize: 12,
+                fontSize: 11,
+                letterSpacing: '0.08em',
               }}
             >
-              DETECTOR
+              by Hugo Macaire
             </span>
           </div>
         </div>
@@ -111,8 +105,10 @@ export function Header({ onRefresh }: { onRefresh: () => void }) {
                 fontFamily: 'monospace',
                 fontSize: 12,
                 fontWeight: 700,
-                background: timeframe === tf ? 'var(--accent-green)' : 'transparent',
-                color: timeframe === tf ? '#0a0b0e' : 'var(--text-secondary)',
+                background:
+                  timeframe === tf ? 'var(--accent-green)' : 'transparent',
+                color:
+                  timeframe === tf ? '#0a0b0e' : 'var(--text-secondary)',
               }}
             >
               {tf}
