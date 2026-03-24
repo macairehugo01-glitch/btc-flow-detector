@@ -44,20 +44,40 @@ export function Header({ onRefresh }: { onRefresh: () => void }) {
           flexWrap: 'wrap',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ color: 'var(--accent-red)', fontSize: 20 }}>•</span>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-            <span
-              style={{
-                fontFamily: 'monospace',
-                fontWeight: 700,
-                letterSpacing: '0.2em',
-                fontSize: 22,
-              }}
-            >
-              BTC FLOW
-            </span>
-            <span
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+  <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+    <span
+      style={{
+        fontFamily: 'monospace',
+        fontWeight: 700,
+        letterSpacing: '0.2em',
+        fontSize: 22,
+      }}
+    >
+      BTC FLOW
+    </span>
+    <span
+      style={{
+        color: 'var(--text-muted)',
+        fontFamily: 'monospace',
+        fontSize: 12,
+      }}
+    >
+      DETECTOR
+    </span>
+  </div>
+
+  <span
+    style={{
+      color: 'var(--text-secondary)',
+      fontFamily: 'monospace',
+      fontSize: 11,
+      letterSpacing: '0.08em',
+    }}
+  >
+    by Hugo Macaire
+  </span>
+</div>
               style={{
                 color: 'var(--text-muted)',
                 fontFamily: 'monospace',
