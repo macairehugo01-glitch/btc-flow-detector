@@ -44,6 +44,18 @@ export type Thresholds = {
   mode: 'aggressive' | 'strict'
 }
 
+export type TradeSignal = {
+  action: 'BUY' | 'SELL' | 'STABLE'
+  confidence: number
+  reasons: string[]
+  metrics: {
+    priceVsVwapPct: number
+    cvdDelta: number
+    oiDeltaPct: number
+    fundingRate: number
+  }
+}
+
 type MarketDataPayload = {
   klines?: KlineBar[]
   vwap?: VWAPBar[]
@@ -52,6 +64,7 @@ type MarketDataPayload = {
   setupHistory?: StoredSetup[]
   ticker?: { price: number; change24h: number; volume24h: number } | null
   funding?: { rate: number; nextFundingTime: number } | null
+  signal?: TradeSignal | null
   lastUpdate?: number | null
 }
 
@@ -64,6 +77,7 @@ type MarketStore = {
 
   ticker: { price: number; change24h: number; volume24h: number } | null
   funding: { rate: number; nextFundingTime: number } | null
+  signal: TradeSignal | null
   lastUpdate: number | null
 
   timeframe: Timeframe
@@ -90,6 +104,7 @@ export const useMarketStore = create<MarketStore>((set) => ({
 
   ticker: null,
   funding: null,
+  signal: null,
   lastUpdate: null,
 
   timeframe: '5m',
