@@ -11,7 +11,7 @@ function fmt(ts: number) {
 }
 
 export function SetupHistory() {
-  const { setupHistory, setupStats } = useMarketStore()
+  const { setupHistory, setupStats, sessionStats } = useMarketStore()
 
   return (
     <div
@@ -68,6 +68,49 @@ export function SetupHistory() {
         </div>
       </div>
 
+      {sessionStats.length > 0 && (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(3, 1fr)',
+            gap: 12,
+          }}
+        >
+          {sessionStats.map((s) => (
+            <div
+              key={s.session}
+              style={{
+                border: '1px solid var(--bg-border)',
+                borderRadius: 10,
+                padding: 12,
+                background: 'rgba(255,255,255,0.02)',
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                  color: 'var(--text-muted)',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.08em',
+                  marginBottom: 8,
+                }}
+              >
+                {s.session}
+              </div>
+
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.8 }}>
+                <div>Total: {s.total}</div>
+                <div style={{ color: 'var(--accent-green)' }}>Wins: {s.wins}</div>
+                <div style={{ color: 'var(--accent-red)' }}>Losses: {s.losses}</div>
+                <div>Open: {s.open}</div>
+                <div>WR: {s.winrate.toFixed(1)}%</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {setupHistory.length === 0 ? (
         <div
           style={{
@@ -77,7 +120,7 @@ export function SetupHistory() {
             fontSize: 13,
           }}
         >
-          Aucun setup 5/5 enregistré
+          Aucun setup 4/5+ enregistré
         </div>
       ) : (
         <div style={{ overflowX: 'auto' }}>
@@ -94,6 +137,7 @@ export function SetupHistory() {
                 {[
                   'Heure',
                   'Session',
+                  'TF',
                   'Action',
                   'Conf',
                   'Entry',
@@ -145,6 +189,7 @@ export function SetupHistory() {
                       {fmt(s.timestamp)}
                     </td>
                     <td style={{ paddingRight: 12 }}>{s.session}</td>
+                    <td style={{ paddingRight: 12 }}>{s.timeframe}</td>
                     <td
                       style={{
                         paddingRight: 12,
