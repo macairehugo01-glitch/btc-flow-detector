@@ -1,5 +1,5 @@
 'use client'
-import { useMarketStore } from './store/useMarketStore'
+import { useMarketStore } from './useMarketStore'
 import type { PatternResult } from '@/types'
 
 const STATE_LABELS: Record<string, string> = {
