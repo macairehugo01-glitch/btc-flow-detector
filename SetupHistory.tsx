@@ -57,8 +57,12 @@ export function SetupHistory() {
           }}
         >
           <span>Total: {setupStats.total}</span>
-          <span style={{ color: 'var(--accent-green)' }}>Wins: {setupStats.wins}</span>
-          <span style={{ color: 'var(--accent-red)' }}>Losses: {setupStats.losses}</span>
+          <span style={{ color: 'var(--accent-green)' }}>
+            Wins: {setupStats.wins}
+          </span>
+          <span style={{ color: 'var(--accent-red)' }}>
+            Losses: {setupStats.losses}
+          </span>
           <span>Open: {setupStats.open}</span>
           <span>WR 2R: {setupStats.winrate.toFixed(1)}%</span>
         </div>
@@ -87,7 +91,17 @@ export function SetupHistory() {
           >
             <thead>
               <tr style={{ borderBottom: '1px solid var(--bg-border)' }}>
-                {['Heure', 'Session', 'Action', 'Conf', 'Entry', 'SL', 'TP', 'RR', 'Status'].map((h) => (
+                {[
+                  'Heure',
+                  'Session',
+                  'Action',
+                  'Conf',
+                  'Entry',
+                  'SL',
+                  'TP',
+                  'RR',
+                  'Status',
+                ].map((h) => (
                   <th
                     key={h}
                     style={{
@@ -106,7 +120,10 @@ export function SetupHistory() {
             <tbody>
               {setupHistory.map((s) => {
                 const actionColor =
-                  s.action === 'BUY' ? 'var(--accent-green)' : 'var(--accent-red)'
+                  s.action === 'BUY'
+                    ? 'var(--accent-green)'
+                    : 'var(--accent-red)'
+
                 const statusColor =
                   s.status === 'win'
                     ? 'var(--accent-green)'
@@ -115,20 +132,46 @@ export function SetupHistory() {
                     : 'var(--accent-yellow)'
 
                 return (
-                  <tr key={s.id} style={{ borderBottom: '1px solid var(--bg-border)' }}>
-                    <td style={{ padding: '8px 12px 8px 0', color: 'var(--text-muted)' }}>
+                  <tr
+                    key={s.id}
+                    style={{ borderBottom: '1px solid var(--bg-border)' }}
+                  >
+                    <td
+                      style={{
+                        padding: '8px 12px 8px 0',
+                        color: 'var(--text-muted)',
+                      }}
+                    >
                       {fmt(s.timestamp)}
                     </td>
                     <td style={{ paddingRight: 12 }}>{s.session}</td>
-                    <td style={{ paddingRight: 12, color: actionColor, fontWeight: 700 }}>
+                    <td
+                      style={{
+                        paddingRight: 12,
+                        color: actionColor,
+                        fontWeight: 700,
+                      }}
+                    >
                       {s.action}
                     </td>
                     <td style={{ paddingRight: 12 }}>{s.confidence}/5</td>
-                    <td style={{ paddingRight: 12 }}>${s.entryPrice.toFixed(2)}</td>
-                    <td style={{ paddingRight: 12 }}>${s.stopLoss.toFixed(2)}</td>
-                    <td style={{ paddingRight: 12 }}>${s.takeProfit.toFixed(2)}</td>
+                    <td style={{ paddingRight: 12 }}>
+                      ${s.entryPrice.toFixed(2)}
+                    </td>
+                    <td style={{ paddingRight: 12 }}>
+                      ${s.stopLoss.toFixed(2)}
+                    </td>
+                    <td style={{ paddingRight: 12 }}>
+                      ${s.takeProfit.toFixed(2)}
+                    </td>
                     <td style={{ paddingRight: 12 }}>{s.rr}</td>
-                    <td style={{ paddingRight: 12, color: statusColor, fontWeight: 700 }}>
+                    <td
+                      style={{
+                        paddingRight: 12,
+                        color: statusColor,
+                        fontWeight: 700,
+                      }}
+                    >
                       {s.status.toUpperCase()}
                     </td>
                   </tr>
