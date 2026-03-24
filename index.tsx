@@ -3,6 +3,8 @@ import { useMarketStore } from './useMarketStore'
 
 type Timeframe = '1m' | '5m' | '15m' | '1h'
 
+const TFS: Timeframe[] = ['1m', '5m', '15m', '1h']
+
 export function Header({ onRefresh }: { onRefresh: () => void }) {
   const store = useMarketStore()
 const ticker = 'ticker' in store ? store.ticker : null
