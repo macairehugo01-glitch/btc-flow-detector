@@ -1,6 +1,6 @@
 'use client'
 import { useMarketData } from '@/hooks/useMarketData'
-import { useMarketStore } from './store/useMarketStore'
+import { useMarketStore } from './useMarketStore'
 import { Header } from '@/components/Header'
 import { StatsBar } from '@/components/StatsBar'
 import { PriceChart } from '@/components/charts/PriceChart'
