@@ -405,18 +405,19 @@ export async function GET(req: NextRequest) {
     evaluateOpenSetups(klines)
 
     return NextResponse.json({
-      klines,
-      vwap,
-      cvd,
-      oi,
-      ticker,
-      funding,
-      signal,
-      setupHistory: getRecentSetups(),
-      setupStats: getStats(),
-      lastUpdate: Date.now(),
-      timeframe: safeTimeframe,
-    })
+  klines,
+  vwap,
+  cvd,
+  oi,
+  ticker,
+  funding,
+  signal,
+  setupHistory: getRecentSetups(),
+  setupStats: getStats(),
+  sessionStats: getSessionStats(),
+  lastUpdate: Date.now(),
+  timeframe: safeTimeframe,
+})
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Unknown API route error'
@@ -432,6 +433,7 @@ export async function GET(req: NextRequest) {
         funding: null,
         signal: null,
         setupHistory: getRecentSetups(),
+        sessionStats: getSessionStats(),
         setupStats: getStats(),
         lastUpdate: Date.now(),
       },
