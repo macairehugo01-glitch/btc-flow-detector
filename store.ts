@@ -1,6 +1,3 @@
-node_modules/
-.next/
-.env
-.env.local
-*.log
-.DS_Store
+export function saveSetup(data: unknown) {
+  return data
+}
