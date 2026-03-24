@@ -13,6 +13,7 @@ import {
   evaluateOpenSetups,
   getRecentSetups,
   getStats,
+  getSessionStats,
   hasRecentDuplicate,
 } from '../../../store'
 
@@ -387,18 +388,19 @@ export async function GET(req: NextRequest) {
     const signal = computeSignal({ klines, vwap, cvd, oi, funding })
 
     if (
-      ticker &&
-      (signal.action === 'BUY' || signal.action === 'SELL') &&
-      signal.confidence >= 4 &&
-      !hasRecentDuplicate(signal.action, Date.now())
-    ) {
-      createSetup({
-        timestamp: Date.now(),
-        action: signal.action,
-        confidence: signal.confidence,
-        entryPrice: ticker.price,
-      })
-    }
+  ticker &&
+  (signal.action === 'BUY' || signal.action === 'SELL') &&
+  signal.confidence >= 4 &&
+  !hasRecentDuplicate(signal.action, safeTimeframe, Date.now())
+) {
+  createSetup({
+    timestamp: Date.now(),
+    timeframe: safeTimeframe,
+    action: signal.action,
+    confidence: signal.confidence,
+    entryPrice: ticker.price,
+  })
+}
 
     evaluateOpenSetups(klines)
 
