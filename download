@@ -1,5 +1,5 @@
 'use client'
-import { useMarketStore } from '@/store/useMarketStore'
+import { useMarketStore } from './store/useMarketStore'
 import { analyzeOI } from '@/lib/indicators'
 
 export function StatsBar() {
