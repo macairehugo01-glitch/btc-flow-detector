@@ -10,6 +10,7 @@ import OIStatsPanel from '../OIStatsPanel'
 import TradeSignalPanel from '../TradeSignalPanel'
 import { useMarketData } from '../useMarketData'
 import { useMarketStore } from '../useMarketStore'
+import ConditionsChecklist from '../ConditionsChecklist'
 
 export default function Page() {
   const { refresh } = useMarketData()
@@ -85,16 +86,7 @@ export default function Page() {
             <TradeSignalPanel />
             <OIStatsPanel />
 
-            <div
-              style={{
-                background: 'var(--bg-card)',
-                border: '1px solid var(--bg-border)',
-                borderRadius: 12,
-                padding: 16,
-              }}
-            >
-              Conditions Checklist
-            </div>
+           <ConditionsChecklist />
 
             <SettingsPanel />
           </div>
