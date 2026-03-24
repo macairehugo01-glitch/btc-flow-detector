@@ -1,8 +1,7 @@
 'use client'
 import { useMarketStore } from './useMarketStore'
-import type { Timeframe } from '@/types'
 
-const TFS: Timeframe[] = ['1m', '5m', '15m', '1h']
+type Timeframe = '1m' | '5m' | '15m' | '1h'
 
 export function Header({ onRefresh }: { onRefresh: () => void }) {
   const { ticker, timeframe, setTimeframe, isConnected, thresholds, setThresholds } = useMarketStore()
