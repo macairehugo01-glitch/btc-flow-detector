@@ -20,12 +20,11 @@ export function useMarketData() {
         cache: 'no-store',
       })
 
-      if (!res.ok) {
-        const text = await res.text()
-        throw new Error(text || 'Failed to fetch market data')
-      }
-
       const data = await res.json()
+
+      if (!res.ok) {
+        throw new Error(data?.error || 'Failed to fetch market data')
+      }
 
       setMarketData({
         klines: data.klines ?? [],
@@ -34,6 +33,7 @@ export function useMarketData() {
         oi: data.oi ?? [],
         ticker: data.ticker ?? null,
         funding: data.funding ?? null,
+        signal: data.signal ?? null,
         lastUpdate: data.lastUpdate ?? Date.now(),
         setupHistory: data.setupHistory ?? [],
       })
