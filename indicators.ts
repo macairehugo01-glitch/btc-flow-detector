@@ -1,5 +1,7 @@
-/** @type {import('next').NextConfig} */
-const nextConfig = {
-  reactStrictMode: true,
+export function calculateVWAP(klines: any[], limit: number) {
+  return []
 }
-module.exports = nextConfig
+
+export function calculateCVD(trades: any[], klines: any[]) {
+  return []
+}
