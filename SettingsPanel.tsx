@@ -45,3 +45,7 @@ export function OIChart() {
     </div>
   )
 }
+
+export function SettingsPanel() {
+  return <div>Settings Panel</div>
+}
