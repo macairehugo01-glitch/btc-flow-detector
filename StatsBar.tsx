@@ -7,7 +7,7 @@ import { CVDChart } from './CVDChart'
 import { PriceChart } from './SignalPanel'
 import OIStatsPanel from './OIStatsPanel'
 import { SetupHistory } from './SetupHistory'
-import { SettingsPanel } from './SettingsPanel'
+import SettingsPanel from './SettingsPanel'
 
 export default function Page() {
   const { refresh } = useMarketData()
