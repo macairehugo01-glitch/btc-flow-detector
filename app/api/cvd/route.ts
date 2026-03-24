@@ -8,6 +8,13 @@ import {
 } from '../../../binance'
 import { calculateVWAP, calculateCVD } from '../../../indicators'
 import type { Timeframe } from '../../../useMarketStore'
+import {
+  createSetup,
+  evaluateOpenSetups,
+  getRecentSetups,
+  getStats,
+  hasRecentDuplicate,
+} from '../../../store'
 
 export const dynamic = 'force-dynamic'
 
@@ -25,6 +32,7 @@ type SignalPayload = {
     cvdDelta: number
     oiDeltaPct: number
     fundingRate: number
+    oiChangeAbs: number
   }
 }
 
@@ -39,12 +47,10 @@ function pushOiSnapshot(snapshot: OIBar) {
     return
   }
 
-  const sameTime = snapshot.time === last.time
-  const sameValue = snapshot.openInterest === last.openInterest
-
-  if (sameTime && sameValue) return
-
-  if (!sameTime || !sameValue) {
+  if (
+    snapshot.time !== last.time ||
+    snapshot.openInterest !== last.openInterest
+  ) {
     oiSessionBuffer.push(snapshot)
   }
 
@@ -60,11 +66,8 @@ function buildOiSeriesForKlines(klines: Array<{ time: number }>): OIBar[] {
     let matched = oiSessionBuffer[0]
 
     for (const point of oiSessionBuffer) {
-      if (point.time <= k.time) {
-        matched = point
-      } else {
-        break
-      }
+      if (point.time <= k.time) matched = point
+      else break
     }
 
     return {
@@ -92,72 +95,156 @@ function computeSignal(args: {
     return {
       action: 'STABLE',
       confidence: 1,
-      reasons: ['Pas assez de données pour confirmer un setup.'],
+      reasons: ['Pas assez de données.'],
       metrics: {
         priceVsVwapPct: 0,
         cvdDelta: 0,
         oiDeltaPct: 0,
         fundingRate: args.funding?.rate ?? 0,
+        oiChangeAbs: 0,
       },
     }
   }
 
   const priceVsVwapPct = ((lastK.close - lastV.vwap) / lastV.vwap) * 100
   const cvdDelta = lastCvd.cvd - prevCvd.cvd
+  const oiChangeAbs = lastOi.openInterest - prevOi.openInterest
   const oiDeltaPct =
     prevOi.openInterest !== 0
-      ? ((lastOi.openInterest - prevOi.openInterest) / prevOi.openInterest) * 100
+      ? (oiChangeAbs / prevOi.openInterest) * 100
       : 0
   const fundingRate = args.funding?.rate ?? 0
 
-  const aboveVwap = lastK.close > lastV.vwap
-  const belowVwap = lastK.close < lastV.vwap
-  const cvdBullish = cvdDelta > 0 && lastCvd.delta > 0
-  const cvdBearish = cvdDelta < 0 && lastCvd.delta < 0
-  const oiRising = oiDeltaPct > 0.01
-  const oiFalling = oiDeltaPct < -0.01
-  const fundingTooHotLong = fundingRate > 0.0008
-  const fundingTooHotShort = fundingRate < -0.0008
+  const aboveVwap = priceVsVwapPct > 0
+  const belowVwap = priceVsVwapPct < 0
+  const strongAboveVwap = priceVsVwapPct > 0.15
+  const strongBelowVwap = priceVsVwapPct < -0.15
 
-  let action: SignalPayload['action'] = 'STABLE'
-  let confidence = 1
+  const cvdBullish = cvdDelta > 0
+  const cvdBearish = cvdDelta < 0
+
+  const oiRising = oiDeltaPct > 0.005
+  const oiFalling = oiDeltaPct < -0.005
+
   const reasons: string[] = []
+  let buyScore = 0
+  let sellScore = 0
 
-  if (aboveVwap && cvdBullish && oiRising && !fundingTooHotLong) {
-    action = 'BUY'
-    confidence = 4
+  if (aboveVwap) {
+    buyScore += 1
     reasons.push('Prix au-dessus de la VWAP.')
-    reasons.push('CVD en hausse avec delta positif.')
-    reasons.push("Open interest en hausse : participation qui s'ajoute.")
-    reasons.push('Funding pas trop extrême côté long.')
-  } else if (belowVwap && cvdBearish && oiRising && !fundingTooHotShort) {
-    action = 'SELL'
-    confidence = 4
+  }
+  if (belowVwap) {
+    sellScore += 1
     reasons.push('Prix sous la VWAP.')
-    reasons.push('CVD en baisse avec delta négatif.')
-    reasons.push("Open interest en hausse : nouvelles positions vendeuses probables.")
-    reasons.push('Funding pas trop extrême côté short.')
-  } else {
-    action = 'STABLE'
-    confidence = 2
+  }
 
-    if (aboveVwap) reasons.push('Prix au-dessus de la VWAP, mais sans vraie confluence.')
-    if (belowVwap) reasons.push('Prix sous la VWAP, mais sans vraie confluence.')
-    if (oiFalling) reasons.push("Open interest en baisse : plutôt de la fermeture que de l'initiative.")
-    if (!cvdBullish && !cvdBearish) reasons.push('CVD neutre ou peu lisible.')
-    if (fundingTooHotLong || fundingTooHotShort) reasons.push('Funding extrême : prudence.')
-    if (!reasons.length) reasons.push('Marché mixte, pas de setup propre.')
+  if (strongAboveVwap) buyScore += 1
+  if (strongBelowVwap) sellScore += 1
+
+  if (cvdBullish) {
+    buyScore += 1
+    reasons.push('CVD positif.')
+  }
+  if (cvdBearish) {
+    sellScore += 1
+    reasons.push('CVD négatif.')
+  }
+
+  if (oiRising && aboveVwap && cvdBullish) {
+    buyScore += 2
+    reasons.push("OI en hausse avec participation haussière.")
+  }
+
+  if (oiRising && belowVwap && cvdBearish) {
+    sellScore += 2
+    reasons.push("OI en hausse avec participation vendeuse.")
+  }
+
+  if (oiFalling) {
+    reasons.push("OI en baisse : plutôt fermeture de positions.")
+  }
+
+  if (fundingRate > 0.001) {
+    buyScore -= 1
+    reasons.push('Funding trop chaud côté long.')
+  }
+
+  if (fundingRate < -0.001) {
+    sellScore -= 1
+    reasons.push('Funding trop chaud côté short.')
+  }
+
+  if (buyScore >= 5 && buyScore > sellScore) {
+    return {
+      action: 'BUY',
+      confidence: 5,
+      reasons,
+      metrics: {
+        priceVsVwapPct,
+        cvdDelta,
+        oiDeltaPct,
+        fundingRate,
+        oiChangeAbs,
+      },
+    }
+  }
+
+  if (sellScore >= 5 && sellScore > buyScore) {
+    return {
+      action: 'SELL',
+      confidence: 5,
+      reasons,
+      metrics: {
+        priceVsVwapPct,
+        cvdDelta,
+        oiDeltaPct,
+        fundingRate,
+        oiChangeAbs,
+      },
+    }
+  }
+
+  if (buyScore >= 3 && buyScore > sellScore) {
+    return {
+      action: 'BUY',
+      confidence: 3,
+      reasons,
+      metrics: {
+        priceVsVwapPct,
+        cvdDelta,
+        oiDeltaPct,
+        fundingRate,
+        oiChangeAbs,
+      },
+    }
+  }
+
+  if (sellScore >= 3 && sellScore > buyScore) {
+    return {
+      action: 'SELL',
+      confidence: 3,
+      reasons,
+      metrics: {
+        priceVsVwapPct,
+        cvdDelta,
+        oiDeltaPct,
+        fundingRate,
+        oiChangeAbs,
+      },
+    }
   }
 
   return {
-    action,
-    confidence,
-    reasons,
+    action: 'STABLE',
+    confidence: 2,
+    reasons: reasons.length ? reasons : ['Marché mixte, pas de setup net.'],
     metrics: {
       priceVsVwapPct,
       cvdDelta,
       oiDeltaPct,
       fundingRate,
+      oiChangeAbs,
     },
   }
 }
@@ -184,6 +271,22 @@ export async function GET(req: NextRequest) {
     const oi = buildOiSeriesForKlines(klines)
     const signal = computeSignal({ klines, vwap, cvd, oi, funding })
 
+    if (
+      ticker &&
+      (signal.action === 'BUY' || signal.action === 'SELL') &&
+      signal.confidence === 5 &&
+      !hasRecentDuplicate(signal.action, Date.now())
+    ) {
+      createSetup({
+        timestamp: Date.now(),
+        action: signal.action,
+        confidence: signal.confidence,
+        entryPrice: ticker.price,
+      })
+    }
+
+    evaluateOpenSetups(klines)
+
     return NextResponse.json({
       klines,
       vwap,
@@ -191,8 +294,9 @@ export async function GET(req: NextRequest) {
       oi,
       ticker,
       funding,
-      setupHistory: [],
       signal,
+      setupHistory: getRecentSetups(),
+      setupStats: getStats(),
       lastUpdate: Date.now(),
       timeframe: safeTimeframe,
     })
@@ -209,18 +313,9 @@ export async function GET(req: NextRequest) {
         oi: [],
         ticker: null,
         funding: null,
-        setupHistory: [],
-        signal: {
-          action: 'STABLE',
-          confidence: 1,
-          reasons: ['Erreur de chargement des données.'],
-          metrics: {
-            priceVsVwapPct: 0,
-            cvdDelta: 0,
-            oiDeltaPct: 0,
-            fundingRate: 0,
-          },
-        },
+        signal: null,
+        setupHistory: getRecentSetups(),
+        setupStats: getStats(),
         lastUpdate: Date.now(),
       },
       { status: 500 }
