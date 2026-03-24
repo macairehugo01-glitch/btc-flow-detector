@@ -1,61 +1,166 @@
 'use client'
-import { useMarketStore } from './useMarketStore'
 
-type Timeframe = '1m' | '5m' | '15m' | '1h'
+import { useMarketStore, type Timeframe } from './useMarketStore'
 
 const TFS: Timeframe[] = ['1m', '5m', '15m', '1h']
 
 export function Header({ onRefresh }: { onRefresh: () => void }) {
-  const store = useMarketStore()
-const ticker = 'ticker' in store ? store.ticker : null
-const timeframe = 'timeframe' in store ? store.timeframe : '5m'
-const setTimeframe = 'setTimeframe' in store ? store.setTimeframe : () => {}
-const isConnected = 'isConnected' in store ? store.isConnected : false
-const thresholds = 'thresholds' in store ? store.thresholds : {}
-const setThresholds = 'setThresholds' in store ? store.setThresholds : () => {}
-  const up = ticker && ticker.change24h >= 0
-  const priceColor = ticker ? (up ? 'var(--accent-green)' : 'var(--accent-red)') : 'var(--text-muted)'
+  const {
+    ticker,
+    timeframe,
+    setTimeframe,
+    isConnected,
+    thresholds,
+    setThresholds,
+  } = useMarketStore()
+
+  const up = ticker ? ticker.change24h >= 0 : false
+  const priceColor = ticker
+    ? up
+      ? 'var(--accent-green)'
+      : 'var(--accent-red)'
+    : 'var(--text-muted)'
 
   return (
-    <header style={{ position: 'sticky', top: 0, zIndex: 50, background: 'rgba(10,11,14,0.96)', backdropFilter: 'blur(12px)', borderBottom: '1px solid var(--bg-border)' }}>
-      <div style={{ maxWidth: 1800, margin: '0 auto', padding: '10px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
-        {/* Logo */}
+    <header
+      style={{
+        position: 'sticky',
+        top: 0,
+        zIndex: 50,
+        background: 'rgba(10,11,14,0.96)',
+        backdropFilter: 'blur(12px)',
+        borderBottom: '1px solid var(--bg-border)',
+      }}
+    >
+      <div
+        style={{
+          maxWidth: 1800,
+          margin: '0 auto',
+          padding: '10px 16px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 16,
+          flexWrap: 'wrap',
+        }}
+      >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span className="live-dot" style={{ width: 8, height: 8, borderRadius: '50%', background: isConnected ? 'var(--accent-green)' : 'var(--accent-red)', display: 'inline-block' }} />
-          <span style={{ fontFamily: 'monospace', fontWeight: 700, fontSize: 14, letterSpacing: '0.15em', color: 'var(--text-primary)' }}>BTC FLOW</span>
-          <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'monospace' }}>DETECTOR</span>
+          <span style={{ color: 'var(--accent-red)', fontSize: 20 }}>•</span>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+            <span
+              style={{
+                fontFamily: 'monospace',
+                fontWeight: 700,
+                letterSpacing: '0.2em',
+                fontSize: 22,
+              }}
+            >
+              BTC FLOW
+            </span>
+            <span
+              style={{
+                color: 'var(--text-muted)',
+                fontFamily: 'monospace',
+                fontSize: 12,
+              }}
+            >
+              DETECTOR
+            </span>
+          </div>
         </div>
 
-        {/* Price */}
-        {ticker && (
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontFamily: 'monospace', fontWeight: 700, fontSize: 20, color: priceColor }}>
-              ${ticker.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </div>
-            <div style={{ fontFamily: 'monospace', fontSize: 11, color: priceColor }}>
-              {up ? '+' : ''}{ticker.change24h.toFixed(2)}% 24h
-            </div>
-          </div>
-        )}
-
-        {/* Timeframe */}
-        <div style={{ display: 'flex', gap: 4, background: 'var(--bg-card)', border: '1px solid var(--bg-border)', borderRadius: 8, padding: 4 }}>
-          {TFS.map(tf => (
-            <button key={tf} onClick={() => setTimeframe(tf)} style={{ padding: '4px 12px', borderRadius: 6, border: 'none', cursor: 'pointer', fontFamily: 'monospace', fontSize: 12, fontWeight: 600, background: timeframe === tf ? 'var(--accent-green)' : 'transparent', color: timeframe === tf ? '#0a0b0e' : 'var(--text-secondary)', transition: 'all 0.15s' }}>
+        <div
+          style={{
+            display: 'flex',
+            gap: 4,
+            background: 'var(--bg-card)',
+            border: '1px solid var(--bg-border)',
+            borderRadius: 8,
+            padding: 4,
+          }}
+        >
+          {TFS.map((tf) => (
+            <button
+              key={tf}
+              onClick={() => setTimeframe(tf)}
+              style={{
+                padding: '8px 14px',
+                borderRadius: 6,
+                border: 'none',
+                cursor: 'pointer',
+                fontFamily: 'monospace',
+                fontSize: 12,
+                fontWeight: 700,
+                background: timeframe === tf ? 'var(--accent-green)' : 'transparent',
+                color: timeframe === tf ? '#0a0b0e' : 'var(--text-secondary)',
+              }}
+            >
               {tf}
             </button>
           ))}
         </div>
 
-        {/* Controls */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <button onClick={() => setThresholds({ mode: thresholds.mode === 'aggressive' ? 'strict' : 'aggressive' })} style={{ padding: '4px 12px', borderRadius: 6, border: `1px solid ${thresholds.mode === 'strict' ? 'var(--accent-yellow)' : 'var(--bg-border)'}`, background: 'transparent', cursor: 'pointer', fontFamily: 'monospace', fontSize: 11, color: thresholds.mode === 'strict' ? 'var(--accent-yellow)' : 'var(--text-muted)' }}>
-            {thresholds.mode === 'strict' ? '🔒 STRICT' : '⚡ AGRESSIF'}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {ticker && (
+            <div
+              style={{
+                fontFamily: 'monospace',
+                fontWeight: 700,
+                color: priceColor,
+                fontSize: 14,
+              }}
+            >
+              ${ticker.price.toLocaleString('en-US', { maximumFractionDigits: 2 })}
+            </div>
+          )}
+
+          <button
+            onClick={() =>
+              setThresholds({
+                mode: thresholds.mode === 'aggressive' ? 'strict' : 'aggressive',
+              })
+            }
+            style={{
+              border: '1px solid var(--bg-border)',
+              background: 'var(--bg-card)',
+              color: 'var(--text-secondary)',
+              borderRadius: 8,
+              padding: '8px 12px',
+              fontFamily: 'monospace',
+              cursor: 'pointer',
+            }}
+          >
+            ⚡ {thresholds.mode.toUpperCase()}
           </button>
-          <span style={{ fontSize: 12, fontFamily: 'monospace', color: isConnected ? 'var(--accent-green)' : 'var(--accent-red)' }}>
-            {isConnected ? '● LIVE' : '○ OFFLINE'}
-          </span>
-          <button onClick={onRefresh} style={{ padding: '4px 10px', borderRadius: 6, border: '1px solid var(--bg-border)', background: 'transparent', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: 13 }}>↻</button>
+
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              color: isConnected ? 'var(--accent-green)' : 'var(--accent-red)',
+              fontFamily: 'monospace',
+              fontSize: 12,
+            }}
+          >
+            <span>●</span>
+            <span>{isConnected ? 'ONLINE' : 'OFFLINE'}</span>
+          </div>
+
+          <button
+            onClick={onRefresh}
+            style={{
+              border: '1px solid var(--bg-border)',
+              background: 'var(--bg-card)',
+              color: 'var(--text-secondary)',
+              borderRadius: 8,
+              padding: '8px 12px',
+              fontFamily: 'monospace',
+              cursor: 'pointer',
+            }}
+          >
+            ↻
+          </button>
         </div>
       </div>
     </header>
