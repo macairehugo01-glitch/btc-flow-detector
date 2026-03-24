@@ -358,12 +358,12 @@ export async function GET(req: NextRequest) {
     const oi = buildOiSeriesForKlines(klines)
     const signal = computeSignal({ klines, vwap, cvd, oi, funding })
 
-    if (
-      ticker &&
-      (signal.action === 'BUY' || signal.action === 'SELL') &&
-      signal.confidence === 5 &&
-      !hasRecentDuplicate(signal.action, Date.now())
-    ) {
+  if (
+  ticker &&
+  (signal.action === 'BUY' || signal.action === 'SELL') &&
+  signal.confidence >= 4 &&
+  !hasRecentDuplicate(signal.action, Date.now())
+) {
       createSetup({
         timestamp: Date.now(),
         action: signal.action,
