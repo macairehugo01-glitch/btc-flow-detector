@@ -5,7 +5,7 @@ import { Header } from './Header'
 import { OIChart } from './SettingsPanel'
 import { CVDChart } from './CVDChart'
 import { PriceChart } from './SignalPanel'
-import { OIStatsPanel } from './OIStatsPanel'
+import OIStatsPanel from './OIStatsPanel'
 import { SetupHistory } from './SetupHistory'
 import { SettingsPanel } from './SettingsPanel'
 
