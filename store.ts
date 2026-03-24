@@ -1,9 +1,12 @@
 type SetupStatus = 'open' | 'win' | 'loss'
+type SessionName = 'Asia' | 'London' | 'New York'
+type Timeframe = '1m' | '5m' | '15m' | '1h'
 
 type StoredSetup = {
   id: string
   timestamp: number
-  session: 'Asia' | 'London' | 'New York'
+  session: SessionName
+  timeframe: Timeframe
   action: 'BUY' | 'SELL'
   confidence: number
   entryPrice: number
@@ -22,9 +25,18 @@ type SetupStats = {
   winrate: number
 }
 
+type SessionStats = {
+  session: SessionName
+  total: number
+  wins: number
+  losses: number
+  open: number
+  winrate: number
+}
+
 const setups: StoredSetup[] = []
 
-function sessionFromTimestamp(tsMs: number): 'Asia' | 'London' | 'New York' {
+function sessionFromTimestamp(tsMs: number): SessionName {
   const hour = new Date(tsMs).getUTCHours()
 
   if (hour >= 0 && hour < 7) return 'Asia'
@@ -34,6 +46,7 @@ function sessionFromTimestamp(tsMs: number): 'Asia' | 'London' | 'New York' {
 
 export function createSetup(input: {
   timestamp: number
+  timeframe: Timeframe
   action: 'BUY' | 'SELL'
   confidence: number
   entryPrice: number
@@ -50,9 +63,10 @@ export function createSetup(input: {
       : input.entryPrice - move * rr
 
   const setup: StoredSetup = {
-    id: `${input.action}-${input.timestamp}`,
+    id: `${input.action}-${input.timeframe}-${input.timestamp}`,
     timestamp: input.timestamp,
     session: sessionFromTimestamp(input.timestamp),
+    timeframe: input.timeframe,
     action: input.action,
     confidence: input.confidence,
     entryPrice: input.entryPrice,
@@ -66,10 +80,15 @@ export function createSetup(input: {
   return setup
 }
 
-export function hasRecentDuplicate(action: 'BUY' | 'SELL', timestamp: number) {
+export function hasRecentDuplicate(
+  action: 'BUY' | 'SELL',
+  timeframe: Timeframe,
+  timestamp: number
+) {
   return setups.some(
     (s) =>
       s.action === action &&
+      s.timeframe === timeframe &&
       Math.abs(s.timestamp - timestamp) < 5 * 60 * 1000
   )
 }
@@ -149,4 +168,25 @@ export function getStats(): SetupStats {
     open,
     winrate: totalClosed > 0 ? (wins / totalClosed) * 100 : 0,
   }
+}
+
+export function getSessionStats(): SessionStats[] {
+  const sessions: SessionName[] = ['Asia', 'London', 'New York']
+
+  return sessions.map((session) => {
+    const filtered = setups.filter((s) => s.session === session)
+    const wins = filtered.filter((s) => s.status === 'win').length
+    const losses = filtered.filter((s) => s.status === 'loss').length
+    const open = filtered.filter((s) => s.status === 'open').length
+    const totalClosed = wins + losses
+
+    return {
+      session,
+      total: filtered.length,
+      wins,
+      losses,
+      open,
+      winrate: totalClosed > 0 ? (wins / totalClosed) * 100 : 0,
+    }
+  })
 }
