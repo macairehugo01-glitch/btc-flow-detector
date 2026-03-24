@@ -27,23 +27,24 @@ export function useMarketData() {
       }
 
       setMarketData({
-        klines: data.klines ?? [],
-        vwap: data.vwap ?? [],
-        cvd: data.cvd ?? [],
-        oi: data.oi ?? [],
-        ticker: data.ticker ?? null,
-        funding: data.funding ?? null,
-        signal: data.signal ?? null,
-        setupHistory: data.setupHistory ?? [],
-        setupStats: data.setupStats ?? {
-          total: 0,
-          wins: 0,
-          losses: 0,
-          open: 0,
-          winrate: 0,
-        },
-        lastUpdate: data.lastUpdate ?? Date.now(),
-      })
+  klines: data.klines ?? [],
+  vwap: data.vwap ?? [],
+  cvd: data.cvd ?? [],
+  oi: data.oi ?? [],
+  ticker: data.ticker ?? null,
+  funding: data.funding ?? null,
+  signal: data.signal ?? null,
+  setupHistory: data.setupHistory ?? [],
+  setupStats: data.setupStats ?? {
+    total: 0,
+    wins: 0,
+    losses: 0,
+    open: 0,
+    winrate: 0,
+  },
+  sessionStats: data.sessionStats ?? [],
+  lastUpdate: data.lastUpdate ?? Date.now(),
+})
 
       setConnected(true)
     } catch (error) {
