@@ -1,6 +1,6 @@
 'use client'
 import { useEffect, useRef, useCallback } from 'react'
-import { useMarketStore } from '@/store/useMarketStore'
+import { useMarketStore } from './store/useMarketStore'
 import { createChart, ColorType, CrosshairMode, LineStyle, type IChartApi, type ISeriesApi, type Time } from 'lightweight-charts'
 
 export function PriceChart() {
