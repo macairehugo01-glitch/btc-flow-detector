@@ -39,24 +39,11 @@ export default function TradeSignalPanel() {
         Signal Panel
       </div>
 
-      <div
-        style={{
-          fontSize: 28,
-          fontWeight: 800,
-          color,
-          marginBottom: 8,
-        }}
-      >
+      <div style={{ fontSize: 28, fontWeight: 800, color, marginBottom: 8 }}>
         {action}
       </div>
 
-      <div
-        style={{
-          fontSize: 13,
-          color: 'var(--text-secondary)',
-          marginBottom: 12,
-        }}
-      >
+      <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
         Confidence: {confidence}/5
       </div>
 
@@ -80,7 +67,8 @@ export default function TradeSignalPanel() {
         >
           <div>Price vs VWAP: {metrics.priceVsVwapPct.toFixed(2)}%</div>
           <div>CVD Δ: {metrics.cvdDelta.toFixed(2)}</div>
-          <div>OI Δ: {metrics.oiDeltaPct.toFixed(4)}%</div>
+          <div>OI Δ abs: {metrics.oiChangeAbs.toFixed(2)}</div>
+          <div>OI Δ %: {metrics.oiDeltaPct.toFixed(4)}%</div>
           <div>Funding: {(metrics.fundingRate * 100).toFixed(4)}%</div>
         </div>
       )}
