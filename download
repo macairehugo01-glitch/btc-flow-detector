@@ -1,0 +1,28 @@
+'use client'
+import { useMarketStore } from '@/store/useMarketStore'
+import { analyzeOI } from '@/lib/indicators'
+
+export function StatsBar() {
+  const { ticker, funding, oi } = useMarketStore()
+  const oiAnalysis = analyzeOI(oi)
+
+  const items = [
+    { label: 'Prix', value: ticker ? `$${ticker.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—', color: ticker ? (ticker.change24h >= 0 ? 'var(--accent-green)' : 'var(--accent-red)') : 'var(--text-muted)' },
+    { label: '24h', value: ticker ? `${ticker.change24h >= 0 ? '+' : ''}${ticker.change24h.toFixed(2)}%` : '—', color: ticker ? (ticker.change24h >= 0 ? 'var(--accent-green)' : 'var(--accent-red)') : 'var(--text-muted)' },
+    { label: 'Volume 24h', value: ticker ? `$${(ticker.volume24h / 1e9).toFixed(2)}B` : '—', color: 'var(--text-secondary)' },
+    { label: 'OI', value: oiAnalysis.current > 0 ? `${(oiAnalysis.current / 1000).toFixed(1)}K BTC` : '—', color: 'var(--accent-blue)' },
+    { label: 'OI 1h', value: oiAnalysis.current > 0 ? `${oiAnalysis.change1h >= 0 ? '+' : ''}${oiAnalysis.change1h.toFixed(2)}%` : '—', color: oiAnalysis.change1h > 0 ? 'var(--accent-green)' : oiAnalysis.change1h < 0 ? 'var(--accent-red)' : 'var(--text-muted)' },
+    { label: 'Funding', value: funding ? `${funding.rate >= 0 ? '+' : ''}${funding.rate.toFixed(4)}%` : '—', color: funding ? (funding.rate > 0.01 ? 'var(--accent-green)' : funding.rate < -0.01 ? 'var(--accent-red)' : 'var(--text-muted)') : 'var(--text-muted)' },
+  ]
+
+  return (
+    <div style={{ background: 'var(--bg-card)', border: '1px solid var(--bg-border)', borderRadius: 10, padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap' }}>
+      {items.map(item => (
+        <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'monospace' }}>{item.label}</span>
+          <span style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 600, color: item.color }}>{item.value}</span>
+        </div>
+      ))}
+    </div>
+  )
+}

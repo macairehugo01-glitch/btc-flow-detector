@@ -1,0 +1,68 @@
+'use client'
+import { useMarketStore } from '@/store/useMarketStore'
+import type { MarketConditions } from '@/types'
+
+const CONDITIONS: { key: keyof MarketConditions; label: string; group: string }[] = [
+  { key: 'vwapBias',               label: 'VWAP Bias Haussier',   group: 'VWAP' },
+  { key: 'oiBuildUp',              label: 'OI Build-Up',           group: 'OI' },
+  { key: 'oiUnwind',               label: 'OI Unwind',             group: 'OI' },
+  { key: 'oiStabilizing',          label: 'OI Stabilisation',      group: 'OI' },
+  { key: 'cvdUp',                  label: 'CVD Haussier',          group: 'CVD' },
+  { key: 'cvdDown',                label: 'CVD Baissier',          group: 'CVD' },
+  { key: 'cvdFlipBullish',         label: 'CVD Flip Haussier',     group: 'CVD' },
+  { key: 'cvdFlipBearish',         label: 'CVD Flip Baissier',     group: 'CVD' },
+  { key: 'impulseUp',              label: 'Impulsion Haussière',   group: 'Prix' },
+  { key: 'impulseDown',            label: 'Impulsion Baissière',   group: 'Prix' },
+  { key: 'consolidationBelowVWAP', label: 'Consolidation < VWAP',  group: 'Prix' },
+  { key: 'consolidationAboveVWAP', label: 'Consolidation > VWAP',  group: 'Prix' },
+]
+
+const GROUP_COLORS: Record<string, string> = {
+  VWAP: 'var(--accent-blue)',
+  OI:   '#9775fa',
+  CVD:  'var(--accent-yellow)',
+  Prix: 'var(--accent-green)',
+}
+
+export function ConditionsChecklist() {
+  const { pattern } = useMarketStore()
+  const cond = pattern?.conditions
+  const groups = ['VWAP', 'OI', 'CVD', 'Prix']
+  const activeCount = cond ? Object.values(cond).filter(Boolean).length : 0
+
+  return (
+    <div style={{ background: 'var(--bg-card)', border: '1px solid var(--bg-border)', borderRadius: 12, padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ fontSize: 11, fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--text-muted)' }}>Conditions</span>
+        <span style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--text-secondary)', background: 'var(--bg-border)', borderRadius: 4, padding: '2px 8px' }}>{activeCount}/12</span>
+      </div>
+
+      {groups.map(group => {
+        const items = CONDITIONS.filter(c => c.group === group)
+        const color = GROUP_COLORS[group]
+        return (
+          <div key={group}>
+            <div style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 600, color, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: color, display: 'inline-block' }} />
+              {group}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {items.map(({ key, label }) => {
+                const active = cond?.[key] ?? false
+                return (
+                  <div key={key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 12px', borderRadius: 8, background: active ? `${color}12` : 'var(--bg-secondary)', border: `1px solid ${active ? `${color}25` : 'transparent'}`, transition: 'all 0.2s' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 12, color: active ? color : 'var(--text-muted)' }}>{active ? '✓' : '○'}</span>
+                      <span style={{ fontSize: 12, color: active ? 'var(--text-primary)' : 'var(--text-muted)' }}>{label}</span>
+                    </div>
+                    <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, color: active ? color : 'var(--text-muted)' }}>{active ? 'OK' : 'NO'}</span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
