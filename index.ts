@@ -4,7 +4,13 @@ import { useMarketStore } from './useMarketStore'
 type Timeframe = '1m' | '5m' | '15m' | '1h'
 
 export function Header({ onRefresh }: { onRefresh: () => void }) {
-  const { ticker, timeframe, setTimeframe, isConnected, thresholds, setThresholds } = useMarketStore()
+  const store = useMarketStore()
+const ticker = 'ticker' in store ? store.ticker : null
+const timeframe = 'timeframe' in store ? store.timeframe : '5m'
+const setTimeframe = 'setTimeframe' in store ? store.setTimeframe : () => {}
+const isConnected = 'isConnected' in store ? store.isConnected : false
+const thresholds = 'thresholds' in store ? store.thresholds : {}
+const setThresholds = 'setThresholds' in store ? store.setThresholds : () => {}
   const up = ticker && ticker.change24h >= 0
   const priceColor = ticker ? (up ? 'var(--accent-green)' : 'var(--accent-red)') : 'var(--text-muted)'
 
