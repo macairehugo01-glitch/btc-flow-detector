@@ -6,7 +6,7 @@ type CvdBar = {
 
 type OIBar = {
   time: string | number
-  value: number
+  openInterest: number
 }
 
 type MarketStore = {
