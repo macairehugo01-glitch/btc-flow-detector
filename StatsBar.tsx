@@ -1,66 +1,89 @@
 'use client'
-import { MiniStatsBar } from './MiniStatsBar'
-import { useMarketData } from './useMarketData'
-import { useMarketStore } from './useMarketStore'
-import { Header } from './Header'
-import { OIChart } from './SettingsPanel'
-import { CVDChart } from './CVDChart'
-import { PriceChart } from './SignalPanel'
-import OIStatsPanel from './OIStatsPanel'
-import { SetupHistory } from './SetupHistory'
-import { SettingsPanel } from './SettingsPanel'
 
-export default function Page() {
-  const { refresh } = useMarketData()
-  const { error, isLoading } = useMarketStore()
+import { useMarketStore } from './useMarketStore'
+
+export default function StatsBar() {
+  const { ticker, funding, lastUpdate, isConnected } = useMarketStore()
+
+  const price = ticker?.price ?? 0
+  const change24h = ticker?.change24h ?? 0
+  const volume24h = ticker?.volume24h ?? 0
+  const fundingPct = (funding?.rate ?? 0) * 100
+
+  const cards = [
+    {
+      label: 'Last Price',
+      value: price ? `$${price.toLocaleString('en-US', { maximumFractionDigits: 2 })}` : '—',
+    },
+    {
+      label: '24h Change',
+      value: `${change24h.toFixed(2)}%`,
+      color:
+        change24h >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
+    },
+    {
+      label: '24h Volume',
+      value: volume24h ? volume24h.toLocaleString('en-US', { maximumFractionDigits: 0 }) : '—',
+    },
+    {
+      label: 'Funding',
+      value: `${fundingPct.toFixed(4)}%`,
+      color:
+        fundingPct >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
+    },
+    {
+      label: 'Status',
+      value: isConnected ? 'ONLINE' : 'OFFLINE',
+      color:
+        isConnected ? 'var(--accent-green)' : 'var(--accent-red)',
+    },
+    {
+      label: 'Last Update',
+      value: lastUpdate ? new Date(lastUpdate).toLocaleTimeString('fr-FR') : '—',
+    },
+  ]
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--bg-primary)' }}>
-      <Header onRefresh={refresh} />
-
-      <main style={{ flex: 1, maxWidth: 1800, margin: '0 auto', width: '100%', padding: '16px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-        {/* Error */}
-        {error && (
-          <div style={{ padding: '8px 16px', borderRadius: 8, background: 'rgba(255,71,87,0.08)', border: '1px solid rgba(255,71,87,0.3)', color: 'var(--accent-red)', fontSize: 13 }}>
-            ⚠ {error}
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(6, minmax(0, 1fr))',
+        gap: 12,
+      }}
+    >
+      {cards.map((card) => (
+        <div
+          key={card.label}
+          style={{
+            background: 'var(--bg-card)',
+            border: '1px solid var(--bg-border)',
+            borderRadius: 12,
+            padding: 14,
+          }}
+        >
+          <div
+            style={{
+              fontSize: 11,
+              fontFamily: 'monospace',
+              color: 'var(--text-muted)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.1em',
+              marginBottom: 8,
+            }}
+          >
+            {card.label}
           </div>
-        )}
-
-        {/* Loading */}
-        {isLoading && (
-          <div style={{ fontSize: 12, fontFamily: 'monospace', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span className="live-dot" style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--accent-green)', display: 'inline-block' }} />
-            Chargement des données Binance...
-          </div>
-        )}
-
-      <div>Stats Bar</div>
-
-        {/* Main layout */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 340px', gap: 16, alignItems: 'start' }}>
-          {/* Left — charts */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <PriceChart />
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-              <OIChart />
-              <CVDChart />
-            </div>
-            <SetupHistory />
-          </div>
-
-          {/* Right — panels */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div>Signal Panel</div>
-            <OIStatsPanel />
-            <div>Conditions Checklist</div>
-            <SettingsPanel />
+          <div
+            style={{
+              fontSize: 16,
+              fontWeight: 700,
+              color: card.color ?? 'var(--text-primary)',
+            }}
+          >
+            {card.value}
           </div>
         </div>
-      </main>
-
-      <footer style={{ textAlign: 'center', padding: '12px', fontSize: 11, fontFamily: 'monospace', color: 'var(--text-muted)', borderTop: '1px solid var(--bg-border)' }}>
-        BTC Flow Detector — Données Binance Futures — Refresh auto 10s — Not financial advice
-      </footer>
+      ))}
     </div>
   )
 }
