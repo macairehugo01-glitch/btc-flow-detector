@@ -32,12 +32,23 @@ export type OIBar = {
 export type StoredSetup = {
   id: string
   timestamp: number
-  marketState: string
-  signal: 'long' | 'short'
-  score: number
+  session: 'Asia' | 'London' | 'New York'
+  action: 'BUY' | 'SELL'
+  confidence: number
   entryPrice: number
   stopLoss: number
   takeProfit: number
+  rr: number
+  status: 'open' | 'win' | 'loss'
+  closedAt?: number
+}
+
+export type SetupStats = {
+  total: number
+  wins: number
+  losses: number
+  open: number
+  winrate: number
 }
 
 export type Thresholds = {
@@ -53,6 +64,7 @@ export type TradeSignal = {
     cvdDelta: number
     oiDeltaPct: number
     fundingRate: number
+    oiChangeAbs: number
   }
 }
 
@@ -62,6 +74,7 @@ type MarketDataPayload = {
   cvd?: CVDBar[]
   oi?: OIBar[]
   setupHistory?: StoredSetup[]
+  setupStats?: SetupStats
   ticker?: { price: number; change24h: number; volume24h: number } | null
   funding?: { rate: number; nextFundingTime: number } | null
   signal?: TradeSignal | null
@@ -74,6 +87,7 @@ type MarketStore = {
   cvd: CVDBar[]
   oi: OIBar[]
   setupHistory: StoredSetup[]
+  setupStats: SetupStats
 
   ticker: { price: number; change24h: number; volume24h: number } | null
   funding: { rate: number; nextFundingTime: number } | null
@@ -101,6 +115,13 @@ export const useMarketStore = create<MarketStore>((set) => ({
   cvd: [],
   oi: [],
   setupHistory: [],
+  setupStats: {
+    total: 0,
+    wins: 0,
+    losses: 0,
+    open: 0,
+    winrate: 0,
+  },
 
   ticker: null,
   funding: null,
