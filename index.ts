@@ -1,5 +1,5 @@
 'use client'
-import { useMarketStore } from './store/useMarketStore'
+import { useMarketStore } from './useMarketStore'
 import type { Timeframe } from '@/types'
 
 const TFS: Timeframe[] = ['1m', '5m', '15m', '1h']
