@@ -7,6 +7,7 @@ import { OIChart, SettingsPanel } from '../SettingsPanel'
 import { PriceChart } from '../SignalPanel'
 import { SetupHistory } from '../SetupHistory'
 import OIStatsPanel from '../OIStatsPanel'
+import TradeSignalPanel from '../TradeSignalPanel'
 import { useMarketData } from '../useMarketData'
 import { useMarketStore } from '../useMarketStore'
 
@@ -51,7 +52,7 @@ export default function Page() {
               color: 'var(--text-muted)',
             }}
           >
-            Chargement des données Binance...
+            Chargement des données marché...
           </div>
         )}
 
@@ -81,17 +82,7 @@ export default function Page() {
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div
-              style={{
-                background: 'var(--bg-card)',
-                border: '1px solid var(--bg-border)',
-                borderRadius: 12,
-                padding: 16,
-              }}
-            >
-              Signal Panel
-            </div>
-
+            <TradeSignalPanel />
             <OIStatsPanel />
 
             <div
