@@ -1,72 +1,69 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { fetchKlines, fetchAggTrades, fetchOIHistory, fetchTicker, fetchFundingRate } from '../../../binance'
+import {
+  fetchKlines,
+  fetchAggTrades,
+  fetchOIHistory,
+  fetchTicker,
+  fetchFundingRate,
+} from '../../../binance'
 import { calculateVWAP, calculateCVD } from '../../../indicators'
-import { saveSetup } from '../../../store'
+import type { Timeframe } from '../../../useMarketStore'
 
 export const dynamic = 'force-dynamic'
 
-const DEFAULT_THRESHOLDS = {
-  mode: 'aggressive',
-}
-
-type Timeframe = '1m' | '3m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1d'
-
-function detectPattern(
-  resolvedKlines: any[],
-  cvd: any,
-  resolvedOI: any[],
-  vwap: any,
-  config: any
-) {
-  return {
-    signal: 'neutral',
-    confidence: 0,
-    mode: config.mode,
-  }
+const OI_PERIOD_BY_TIMEFRAME: Record<Timeframe, string> = {
+  '1m': '5m',
+  '5m': '5m',
+  '15m': '15m',
+  '1h': '1h',
 }
 
 export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url)
-  const timeframe = (searchParams.get('timeframe') ?? '5m') as Timeframe
-  const mode = searchParams.get('mode') === 'strict' ? 'strict' : 'aggressive'
+  const timeframe = (req.nextUrl.searchParams.get('timeframe') ?? '5m') as Timeframe
+  const safeTimeframe: Timeframe = ['1m', '5m', '15m', '1h'].includes(timeframe)
+    ? timeframe
+    : '5m'
 
   try {
-    const [klines, trades, oiHistory, ticker, funding] = await Promise.allSettled([
-      fetchKlines(timeframe, 200),
+    const [klines, trades, oi, ticker, funding] = await Promise.all([
+      fetchKlines(safeTimeframe, 200),
       fetchAggTrades(500),
-      fetchOIHistory('5m', 96),
+      fetchOIHistory(OI_PERIOD_BY_TIMEFRAME[safeTimeframe], 96),
       fetchTicker(),
       fetchFundingRate(),
     ])
 
-    const resolvedKlines = klines.status === 'fulfilled' ? klines.value : []
-    const resolvedTrades = trades.status === 'fulfilled' ? trades.value : []
-    const resolvedOI = oiHistory.status === 'fulfilled' ? oiHistory.value : []
+    const vwap = calculateVWAP(klines, 200)
+    const cvd = calculateCVD(trades, klines)
 
-    const vwap = calculateVWAP(resolvedKlines, 100)
-    const cvd = calculateCVD(resolvedTrades, resolvedKlines)
-    const config = { ...DEFAULT_THRESHOLDS, mode }
-    const pattern = detectPattern(resolvedKlines, cvd, resolvedOI, vwap, config)
-
-    try {
-      saveSetup(pattern)
-    } catch {}
+    return NextResponse.json({
+      klines,
+      vwap,
+      cvd,
+      oi,
+      ticker,
+      funding,
+      setupHistory: [],
+      lastUpdate: Date.now(),
+      timeframe: safeTimeframe,
+    })
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Unknown API route error'
 
     return NextResponse.json(
       {
-        klines: resolvedKlines,
-        vwap,
-        cvd,
-        oi: resolvedOI,
-        pattern,
+        error: message,
+        klines: [],
+        vwap: [],
+        cvd: [],
+        oi: [],
+        ticker: null,
+        funding: null,
+        setupHistory: [],
         lastUpdate: Date.now(),
-        timeframe,
-        ticker: ticker.status === 'fulfilled' ? ticker.value : null,
-        funding: funding.status === 'fulfilled' ? funding.value : null,
       },
-      { headers: { 'Cache-Control': 'no-store' } }
+      { status: 500 }
     )
-  } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 })
   }
 }
