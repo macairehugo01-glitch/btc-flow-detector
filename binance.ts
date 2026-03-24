@@ -1,53 +1,5 @@
-const BYBIT_BASE = 'https://api.bybit.com'
+const OKX_BASE = 'https://www.okx.com'
 const COINGECKO_BASE = 'https://api.coingecko.com/api/v3'
-
-type BybitKlineRow = [string, string, string, string, string, string, string]
-type BybitApiResponse<T> = {
-  retCode: number
-  retMsg: string
-  result: T
-}
-
-type BybitKlineResult = {
-  category: string
-  symbol: string
-  list: BybitKlineRow[]
-}
-
-type BybitTrade = {
-  T: number
-  p: string
-  v: string
-  S: 'Buy' | 'Sell'
-}
-
-type BybitTradeResult = {
-  category: string
-  list: BybitTrade[]
-}
-
-type BybitOIItem = {
-  openInterest: string
-  timestamp: string
-}
-
-type BybitOIResult = {
-  category: string
-  symbol: string
-  list: BybitOIItem[]
-  nextPageCursor?: string
-}
-
-type BybitFundingItem = {
-  symbol: string
-  fundingRate: string
-  fundingRateTimestamp: string
-}
-
-type BybitFundingResult = {
-  category: string
-  list: BybitFundingItem[]
-}
 
 type Kline = {
   time: number
@@ -81,6 +33,12 @@ type FundingData = {
   nextFundingTime: number
 }
 
+type OkxResponse<T> = {
+  code: string
+  msg: string
+  data: T[]
+}
+
 async function httpJson<T>(url: string): Promise<T> {
   const res = await fetch(url, {
     method: 'GET',
@@ -98,48 +56,48 @@ async function httpJson<T>(url: string): Promise<T> {
   return res.json() as Promise<T>
 }
 
-function mapTimeframeToBybit(tf: string): string {
+function mapTimeframeToOkx(tf: string): string {
   switch (tf) {
     case '1m':
-      return '1'
+      return '1m'
     case '5m':
-      return '5'
+      return '5m'
     case '15m':
-      return '15'
+      return '15m'
     case '1h':
-      return '60'
+      return '1H'
     default:
-      return '5'
+      return '5m'
   }
 }
 
-function mapOIInterval(tf: string): string {
+function mapPeriodToOkx(tf: string): string {
   switch (tf) {
     case '1m':
-      return '5min'
+      return '5m'
     case '5m':
-      return '5min'
+      return '5m'
     case '15m':
-      return '15min'
+      return '15m'
     case '1h':
-      return '1h'
+      return '1H'
     default:
-      return '5min'
+      return '5m'
   }
 }
 
 export async function fetchKlines(timeframe: string, limit: number): Promise<Kline[]> {
-  const interval = mapTimeframeToBybit(timeframe)
+  const bar = mapTimeframeToOkx(timeframe)
 
-  const data = await httpJson<BybitApiResponse<BybitKlineResult>>(
-    `${BYBIT_BASE}/v5/market/kline?category=linear&symbol=BTCUSDT&interval=${interval}&limit=${limit}`
+  const data = await httpJson<OkxResponse<string[]>>(
+    `${OKX_BASE}/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=${encodeURIComponent(bar)}&limit=${limit}`
   )
 
-  if (data.retCode !== 0) {
-    throw new Error(`Bybit kline error: ${data.retMsg}`)
+  if (data.code !== '0') {
+    throw new Error(`OKX candles error: ${data.msg}`)
   }
 
-  return [...data.result.list]
+  return [...data.data]
     .reverse()
     .map((k) => ({
       time: Math.floor(Number(k[0]) / 1000),
@@ -152,67 +110,83 @@ export async function fetchKlines(timeframe: string, limit: number): Promise<Kli
 }
 
 export async function fetchAggTrades(limit: number): Promise<AggTrade[]> {
-  const capped = Math.min(Math.max(limit, 1), 1000)
+  const capped = Math.min(Math.max(limit, 1), 100)
 
-  const data = await httpJson<BybitApiResponse<BybitTradeResult>>(
-    `${BYBIT_BASE}/v5/market/recent-trade?category=linear&symbol=BTCUSDT&limit=${capped}`
+  const data = await httpJson<OkxResponse<{
+    instId: string
+    tradeId: string
+    px: string
+    sz: string
+    side: 'buy' | 'sell'
+    ts: string
+  }>>(
+    `${OKX_BASE}/api/v5/market/trades?instId=BTC-USDT-SWAP&limit=${capped}`
   )
 
-  if (data.retCode !== 0) {
-    throw new Error(`Bybit trade error: ${data.retMsg}`)
+  if (data.code !== '0') {
+    throw new Error(`OKX trades error: ${data.msg}`)
   }
 
-  return [...data.result.list]
+  return [...data.data]
     .reverse()
     .map((t) => ({
-      time: Math.floor(Number(t.T) / 1000),
-      price: Number(t.p),
-      quantity: Number(t.v),
-      isBuyerMaker: t.S === 'Sell',
+      time: Math.floor(Number(t.ts) / 1000),
+      price: Number(t.px),
+      quantity: Number(t.sz),
+      isBuyerMaker: t.side === 'sell',
     }))
 }
 
 export async function fetchOIHistory(period: string, limit: number): Promise<OIBar[]> {
-  const intervalTime = mapOIInterval(period)
-  const capped = Math.min(Math.max(limit, 1), 200)
+  const bar = mapPeriodToOkx(period)
+  const capped = Math.min(Math.max(limit, 1), 100)
 
-  const data = await httpJson<BybitApiResponse<BybitOIResult>>(
-    `${BYBIT_BASE}/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=${intervalTime}&limit=${capped}`
+  const data = await httpJson<OkxResponse<{
+    oi: string
+    oiCcy?: string
+    ts: string
+  }>>(
+    `${OKX_BASE}/api/v5/public/open-interest-history?instId=BTC-USDT-SWAP&period=${encodeURIComponent(bar)}&limit=${capped}`
   )
 
-  if (data.retCode !== 0) {
-    throw new Error(`Bybit open interest error: ${data.retMsg}`)
+  if (data.code !== '0') {
+    throw new Error(`OKX open interest history error: ${data.msg}`)
   }
 
-  return [...data.result.list]
+  return [...data.data]
     .reverse()
     .map((item) => ({
-      time: Math.floor(Number(item.timestamp) / 1000),
-      openInterest: Number(item.openInterest),
+      time: Math.floor(Number(item.ts) / 1000),
+      openInterest: Number(item.oi),
     }))
 }
 
 export async function fetchTicker(): Promise<TickerData> {
   try {
-    const data = await httpJson<BybitApiResponse<{ list: Array<{
-      symbol: string
-      lastPrice: string
-      price24hPcnt: string
-      volume24h: string
-    }> }>>(
-      `${BYBIT_BASE}/v5/market/tickers?category=linear&symbol=BTCUSDT`
+    const data = await httpJson<OkxResponse<{
+      instId: string
+      last: string
+      vol24h: string
+      sodUtc0?: string
+      open24h?: string
+    }>>(
+      `${OKX_BASE}/api/v5/market/ticker?instId=BTC-USDT-SWAP`
     )
 
-    if (data.retCode !== 0 || !data.result.list?.length) {
-      throw new Error(`Bybit ticker error: ${data.retMsg}`)
+    if (data.code !== '0' || !data.data.length) {
+      throw new Error(`OKX ticker error: ${data.msg}`)
     }
 
-    const item = data.result.list[0]
+    const item = data.data[0]
+    const last = Number(item.last)
+    const open24h = Number(item.open24h ?? item.sodUtc0 ?? 0)
+    const change24h =
+      open24h > 0 ? ((last - open24h) / open24h) * 100 : 0
 
     return {
-      price: Number(item.lastPrice),
-      change24h: Number(item.price24hPcnt) * 100,
-      volume24h: Number(item.volume24h),
+      price: last,
+      change24h,
+      volume24h: Number(item.vol24h),
     }
   } catch {
     const cg = await httpJson<Record<string, {
@@ -234,19 +208,29 @@ export async function fetchTicker(): Promise<TickerData> {
 }
 
 export async function fetchFundingRate(): Promise<FundingData> {
-  const data = await httpJson<BybitApiResponse<BybitFundingResult>>(
-    `${BYBIT_BASE}/v5/market/funding/history?category=linear&symbol=BTCUSDT&limit=1`
+  const data = await httpJson<OkxResponse<{
+    instId: string
+    fundingRate: string
+    fundingTime: string
+    nextFundingRate?: string
+    nextFundingTime?: string
+  }>>(
+    `${OKX_BASE}/api/v5/public/funding-rate-history?instId=BTC-USDT-SWAP&limit=1`
   )
 
-  if (data.retCode !== 0 || !data.result.list?.length) {
-    throw new Error(`Bybit funding error: ${data.retMsg}`)
+  if (data.code !== '0' || !data.data.length) {
+    throw new Error(`OKX funding error: ${data.msg}`)
   }
 
-  const item = data.result.list[0]
-  const fundingTs = Number(item.fundingRateTimestamp)
+  const item = data.data[0]
+  const fundingTime = Number(item.fundingTime)
+  const nextFundingTime =
+    item.nextFundingTime != null
+      ? Number(item.nextFundingTime)
+      : fundingTime + 8 * 60 * 60 * 1000
 
   return {
     rate: Number(item.fundingRate),
-    nextFundingTime: fundingTs + 8 * 60 * 60 * 1000,
+    nextFundingTime,
   }
 }
