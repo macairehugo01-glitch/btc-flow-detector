@@ -1,30 +1,35 @@
-type Timeframe = '1m' | '5m' | '15m' | '1h'
+'use client'
 
-type CvdBar = {
-  time: string | number
-  cvd: number
-  delta: number
-}
+import { create } from 'zustand'
 
-type OIBar = {
-  time: string | number
-  openInterest: number
-}
+export type Timeframe = '1m' | '5m' | '15m' | '1h'
 
-type KlineBar = {
-  time: string | number
+export type KlineBar = {
+  time: number
   open: number
   high: number
   low: number
   close: number
+  volume: number
 }
 
-type VWAPBar = {
-  time: string | number
+export type VWAPBar = {
+  time: number
   vwap: number
 }
 
-type StoredSetup = {
+export type CVDBar = {
+  time: number
+  delta: number
+  cvd: number
+}
+
+export type OIBar = {
+  time: number
+  openInterest: number
+}
+
+export type StoredSetup = {
   id: string
   timestamp: number
   marketState: string
@@ -35,40 +40,81 @@ type StoredSetup = {
   takeProfit: number
 }
 
-type Thresholds = {
-  mode?: string
+export type Thresholds = {
+  mode: 'aggressive' | 'strict'
+}
+
+type MarketDataPayload = {
+  klines?: KlineBar[]
+  vwap?: VWAPBar[]
+  cvd?: CVDBar[]
+  oi?: OIBar[]
+  setupHistory?: StoredSetup[]
+  ticker?: { price: number; change24h: number; volume24h: number } | null
+  funding?: { rate: number; nextFundingTime: number } | null
+  lastUpdate?: number | null
 }
 
 type MarketStore = {
-  cvd: CvdBar[]
-  oi: OIBar[]
   klines: KlineBar[]
   vwap: VWAPBar[]
+  cvd: CVDBar[]
+  oi: OIBar[]
   setupHistory: StoredSetup[]
-  error: string | null
-  isLoading: boolean
+
   ticker: { price: number; change24h: number; volume24h: number } | null
+  funding: { rate: number; nextFundingTime: number } | null
+  lastUpdate: number | null
+
   timeframe: Timeframe
   isConnected: boolean
+  isLoading: boolean
+  error: string | null
+
   thresholds: Thresholds
+
   setTimeframe: (tf: Timeframe) => void
   setThresholds: (t: Partial<Thresholds>) => void
+  setMarketData: (data: MarketDataPayload) => void
+  setError: (error: string | null) => void
+  setLoading: (value: boolean) => void
+  setConnected: (value: boolean) => void
 }
 
-export function useMarketStore(): MarketStore {
-  return {
-    cvd: [],
-    oi: [],
-    klines: [],
-    vwap: [],
-    setupHistory: [],
-    error: null,
-    isLoading: false,
-    ticker: null,
-    timeframe: '5m',
-    isConnected: false,
-    thresholds: {},
-    setTimeframe: () => {},
-    setThresholds: () => {},
-  }
-}
+export const useMarketStore = create<MarketStore>((set) => ({
+  klines: [],
+  vwap: [],
+  cvd: [],
+  oi: [],
+  setupHistory: [],
+
+  ticker: null,
+  funding: null,
+  lastUpdate: null,
+
+  timeframe: '5m',
+  isConnected: false,
+  isLoading: false,
+  error: null,
+
+  thresholds: {
+    mode: 'aggressive',
+  },
+
+  setTimeframe: (timeframe) => set({ timeframe }),
+  setThresholds: (t) =>
+    set((state) => ({
+      thresholds: {
+        ...state.thresholds,
+        ...t,
+      },
+    })),
+  setMarketData: (data) =>
+    set((state) => ({
+      ...state,
+      ...data,
+    })),
+  setError: (error) => set({ error }),
+  setLoading: (isLoading) => set({ isLoading }),
+  setConnected: (isConnected) => set({ isConnected }),
+}))
