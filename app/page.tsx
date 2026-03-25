@@ -11,6 +11,7 @@ import TradeSignalPanel from '../TradeSignalPanel'
 import { useMarketData } from '../useMarketData'
 import { useMarketStore } from '../useMarketStore'
 import ConditionsChecklist from '../ConditionsChecklist'
+import EconomicCalendarPanel from '../EconomicCalendarPanel'
 
 export default function Page() {
   const { refresh } = useMarketData()
@@ -67,8 +68,22 @@ export default function Page() {
             alignItems: 'start',
           }}
         >
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <PriceChart />
+       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+  {/* TOP: chart + calendar */}
+  <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
+    <PriceChart />
+    <EconomicCalendarPanel />
+  </div>
+
+  {/* dessous inchangé */}
+  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+    <OIChart />
+    <CVDChart />
+  </div>
+
+  <SetupHistory />
+</div>
             <div
               style={{
                 display: 'grid',
