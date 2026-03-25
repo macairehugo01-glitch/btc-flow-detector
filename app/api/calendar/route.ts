@@ -23,7 +23,8 @@ function clean(text: string) {
 
 export async function GET() {
   try {
-    const res = await fetch('https://feeds.reuters.com/reuters/businessNews', {
+    const res = await fetch(
+  'https://www.cnbc.com/id/100003114/device/rss/rss.html', {
       cache: 'no-store',
     })
 
