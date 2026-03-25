@@ -8,10 +8,10 @@ import { PriceChart } from '../SignalPanel'
 import { SetupHistory } from '../SetupHistory'
 import OIStatsPanel from '../OIStatsPanel'
 import TradeSignalPanel from '../TradeSignalPanel'
-import { useMarketData } from '../useMarketData'
-import { useMarketStore } from '../useMarketStore'
 import ConditionsChecklist from '../ConditionsChecklist'
 import EconomicCalendarPanel from '../EconomicCalendarPanel'
+import { useMarketData } from '../useMarketData'
+import { useMarketStore } from '../useMarketStore'
 
 export default function Page() {
   const { refresh } = useMarketData()
@@ -68,22 +68,12 @@ export default function Page() {
             alignItems: 'start',
           }}
         >
-       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
+              <PriceChart />
+              <EconomicCalendarPanel />
+            </div>
 
-  {/* TOP: chart + calendar */}
-  <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
-    <PriceChart />
-    <EconomicCalendarPanel />
-  </div>
-
-  {/* dessous inchangé */}
-  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-    <OIChart />
-    <CVDChart />
-  </div>
-
-  <SetupHistory />
-</div>
             <div
               style={{
                 display: 'grid',
@@ -94,15 +84,14 @@ export default function Page() {
               <OIChart />
               <CVDChart />
             </div>
+
             <SetupHistory />
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             <TradeSignalPanel />
             <OIStatsPanel />
-
-           <ConditionsChecklist />
-
+            <ConditionsChecklist />
             <SettingsPanel />
           </div>
         </div>
