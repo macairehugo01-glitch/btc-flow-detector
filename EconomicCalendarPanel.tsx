@@ -1,7 +1,5 @@
 'use client'
 
-import Script from 'next/script'
-
 export default function EconomicCalendarPanel() {
   return (
     <div
@@ -27,25 +25,21 @@ export default function EconomicCalendarPanel() {
           marginBottom: 8,
         }}
       >
-        Macro News Feed
+        Macro News (Live)
       </div>
 
-      {/* Feed */}
-      <div style={{ flex: 1, overflow: 'hidden' }}>
-        <a
-          className="twitter-timeline"
-          data-theme="dark"
-          data-height="100%"
-          href="https://twitter.com/FinancialJuice"
-        >
-          Tweets by FinancialJuice
-        </a>
-
-        <Script
-          src="https://platform.twitter.com/widgets.js"
-          strategy="afterInteractive"
-        />
-      </div>
+      {/* Feed X */}
+      <iframe
+        src="https://twitframe.com/show?url=https://twitter.com/FinancialJuice"
+        style={{
+          width: '100%',
+          flex: 1,
+          border: 'none',
+          borderRadius: 8,
+          background: '#13151c',
+        }}
+        title="Macro News Feed"
+      />
     </div>
   )
 }
