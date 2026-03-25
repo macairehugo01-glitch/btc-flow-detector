@@ -4,30 +4,33 @@ import { useEffect, useState } from 'react'
 
 type CalendarItem = {
   CalendarID?: string
-  Date: string
-  Country: string
-  Event: string
+  Date?: string
+  Country?: string
+  Event?: string
   Actual?: string
   Previous?: string
   Forecast?: string
-  Importance: number
+  Importance?: number
   Currency?: string
 }
 
-function formatTime(dateStr: string) {
-  return new Date(dateStr).toLocaleTimeString('fr-FR', {
+function formatTime(dateStr?: string) {
+  if (!dateStr) return '—'
+  const d = new Date(dateStr)
+  if (Number.isNaN(d.getTime())) return '—'
+  return d.toLocaleTimeString('fr-FR', {
     hour: '2-digit',
     minute: '2-digit',
   })
 }
 
-function starLabel(importance: number) {
+function starLabel(importance?: number) {
   if (importance === 3) return '★★★'
   if (importance === 2) return '★★'
   return '★'
 }
 
-function starColor(importance: number) {
+function starColor(importance?: number) {
   if (importance === 3) return 'var(--accent-red)'
   if (importance === 2) return 'var(--accent-yellow)'
   return 'var(--text-muted)'
@@ -38,6 +41,7 @@ export default function EconomicCalendarPanel() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [lastUpdate, setLastUpdate] = useState<number | null>(null)
+  const [debug, setDebug] = useState<{ totalRaw?: number; totalFiltered?: number }>({})
 
   useEffect(() => {
     let cancelled = false
@@ -58,6 +62,10 @@ export default function EconomicCalendarPanel() {
         if (!cancelled) {
           setItems(data.items ?? [])
           setLastUpdate(data.lastUpdate ?? Date.now())
+          setDebug({
+            totalRaw: data.totalRaw,
+            totalFiltered: data.totalFiltered,
+          })
         }
       } catch (err) {
         if (!cancelled) {
@@ -136,6 +144,12 @@ export default function EconomicCalendarPanel() {
         <div style={{ color: 'var(--accent-red)', fontSize: 13 }}>
           ⚠ {error}
         </div>
+      ) : items.length === 0 ? (
+        <div style={{ color: 'var(--text-muted)', fontSize: 13, lineHeight: 1.6 }}>
+          <div>Aucune news 2★ / 3★ trouvée.</div>
+          <div>Raw: {debug.totalRaw ?? 0}</div>
+          <div>Filtered: {debug.totalFiltered ?? 0}</div>
+        </div>
       ) : (
         <div
           style={{
@@ -196,7 +210,7 @@ export default function EconomicCalendarPanel() {
                   lineHeight: 1.3,
                 }}
               >
-                {item.Country} — {item.Event}
+                {item.Country || '—'} — {item.Event || '—'}
               </div>
 
               <div
