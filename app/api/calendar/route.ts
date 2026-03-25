@@ -4,14 +4,23 @@ export const dynamic = 'force-dynamic'
 
 type TECalendarItem = {
   CalendarID?: string
-  Date: string
-  Country: string
-  Event: string
+  Date?: string
+  Country?: string
+  Event?: string
   Actual?: string
   Previous?: string
   Forecast?: string
-  Importance: number
+  Importance?: number | string
   Currency?: string
+}
+
+function normalizeImportance(value: number | string | undefined) {
+  if (typeof value === 'number') return value
+  if (typeof value === 'string') {
+    const n = Number(value)
+    if (!Number.isNaN(n)) return n
+  }
+  return 0
 }
 
 export async function GET() {
@@ -33,13 +42,23 @@ export async function GET() {
 
     const raw = (await res.json()) as TECalendarItem[]
 
-    const filtered = raw
-      .filter((item) => item.Importance === 2 || item.Importance === 3)
-      .sort((a, b) => new Date(a.Date).getTime() - new Date(b.Date).getTime())
+    const mapped = raw.map((item) => ({
+      ...item,
+      Importance: normalizeImportance(item.Importance),
+    }))
+
+    const filtered = mapped
+      .filter((item) => (item.Importance ?? 0) >= 2)
+      .sort(
+        (a, b) =>
+          new Date(a.Date ?? 0).getTime() - new Date(b.Date ?? 0).getTime()
+      )
       .slice(0, 20)
 
     return NextResponse.json({
       items: filtered,
+      totalRaw: raw.length,
+      totalFiltered: filtered.length,
       lastUpdate: Date.now(),
     })
   } catch (error) {
@@ -50,6 +69,8 @@ export async function GET() {
       {
         error: message,
         items: [],
+        totalRaw: 0,
+        totalFiltered: 0,
         lastUpdate: Date.now(),
       },
       { status: 500 }
