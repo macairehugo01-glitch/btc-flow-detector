@@ -2,75 +2,63 @@ import { NextResponse } from 'next/server'
 
 export const dynamic = 'force-dynamic'
 
-type TECalendarItem = {
-  CalendarID?: string
-  Date?: string
-  Country?: string
-  Event?: string
-  Actual?: string
-  Previous?: string
-  Forecast?: string
-  Importance?: number | string
-  Currency?: string
+type NewsItem = {
+  id: string
+  title: string
+  link: string
+  pubDate: string
 }
 
-function normalizeImportance(value: number | string | undefined) {
-  if (typeof value === 'number') return value
-  if (typeof value === 'string') {
-    const n = Number(value)
-    if (!Number.isNaN(n)) return n
-  }
-  return 0
+function extractTag(content: string, tag: string) {
+  const match = content.match(new RegExp(`<${tag}>(.*?)</${tag}>`, 's'))
+  return match ? match[1] : ''
+}
+
+function clean(text: string) {
+  return text
+    .replace(/<!\\[CDATA\\[(.*?)\\]\\]>/g, '$1')
+    .replace(/<[^>]*>/g, '')
+    .trim()
 }
 
 export async function GET() {
   try {
-    const res = await fetch(
-      'https://api.tradingeconomics.com/calendar?c=guest:guest&f=json',
-      {
-        cache: 'no-store',
-        headers: {
-          Accept: 'application/json',
-        },
-      }
-    )
+    const res = await fetch('https://feeds.reuters.com/reuters/businessNews', {
+      cache: 'no-store',
+    })
 
     if (!res.ok) {
-      const text = await res.text()
-      throw new Error(`TradingEconomics error ${res.status}: ${text}`)
+      throw new Error(`RSS error ${res.status}`)
     }
 
-    const raw = (await res.json()) as TECalendarItem[]
+    const xml = await res.text()
+    const itemsRaw = xml.split('<item>').slice(1)
 
-    const mapped = raw.map((item) => ({
-      ...item,
-      Importance: normalizeImportance(item.Importance),
-    }))
+    const items: NewsItem[] = itemsRaw.slice(0, 20).map((item, i) => {
+      const title = clean(extractTag(item, 'title'))
+      const link = extractTag(item, 'link')
+      const pubDate = extractTag(item, 'pubDate')
 
-    const filtered = mapped
-      .filter((item) => (item.Importance ?? 0) >= 2)
-      .sort(
-        (a, b) =>
-          new Date(a.Date ?? 0).getTime() - new Date(b.Date ?? 0).getTime()
-      )
-      .slice(0, 20)
+      return {
+        id: link || `${title}-${i}`,
+        title,
+        link,
+        pubDate,
+      }
+    })
 
     return NextResponse.json({
-      items: filtered,
-      totalRaw: raw.length,
-      totalFiltered: filtered.length,
+      items,
       lastUpdate: Date.now(),
     })
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : 'Unknown calendar route error'
+      error instanceof Error ? error.message : 'Failed to fetch RSS'
 
     return NextResponse.json(
       {
         error: message,
         items: [],
-        totalRaw: 0,
-        totalFiltered: 0,
         lastUpdate: Date.now(),
       },
       { status: 500 }
