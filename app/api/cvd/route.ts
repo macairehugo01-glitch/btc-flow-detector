@@ -130,6 +130,8 @@ function computeSignal(args: {
   const fundingRate = args.funding?.rate ?? 0
 
   const priceVsVwapPct = ((lastK.close - lastV.vwap) / lastV.vwap) * 100
+  const distanceFromVwapPct = Math.abs(priceVsVwapPct)
+const closeEnoughToVwap = distanceFromVwapPct <= 1
   const cvdDelta = lastCvd.cvd - prevCvd.cvd
   const oiChangeAbs = lastOi.openInterest - prevOi.openInterest
   const oiDeltaPct =
@@ -181,10 +183,14 @@ function computeSignal(args: {
   let sellScore = 0
   const reasons: string[] = []
 
-  if (aboveVwap) {
-    buyScore += 1
-    reasons.push('Prix au-dessus de la VWAP.')
-  }
+ if (aboveVwap) {
+  buyScore += 1
+  reasons.push('Prix au-dessus de la VWAP.')
+}
+
+if (!aboveVwap) {
+  buyScore = -999
+}
 
   if (crossedAboveVwap || reclaimAboveVwap) {
     buyScore += 2
@@ -221,10 +227,20 @@ function computeSignal(args: {
     reasons.push('Funding trop chaud côté long.')
   }
 
-  if (belowVwap) {
-    sellScore += 1
-    reasons.push('Prix sous la VWAP.')
-  }
+if (belowVwap) {
+  sellScore += 1
+  reasons.push('Prix sous la VWAP.')
+}
+
+if (!belowVwap) {
+  sellScore = -999
+}
+
+  if (!closeEnoughToVwap) {
+  reasons.push('Prix trop éloigné de la VWAP (> 1%).')
+  buyScore = -999
+  sellScore = -999
+}
 
   if (crossedBelowVwap || rejectBelowVwap) {
     sellScore += 2
