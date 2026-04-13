@@ -9,12 +9,15 @@ import {
 import { calculateVWAP, calculateCVD } from '../../../indicators'
 import type { Timeframe } from '../../../useMarketStore'
 import {
-  createSetup,
   evaluateOpenSetups,
   getRecentSetups,
   getStats,
   getSessionStats,
+  getCurrentPosition,
+  getLastReverseBarKey,
   hasRecentDuplicate,
+  openPosition,
+  reversePosition,
 } from '../../../store'
 
 export const dynamic = 'force-dynamic'
@@ -34,6 +37,7 @@ type SignalPayload = {
     oiDeltaPct: number
     fundingRate: number
     oiChangeAbs: number
+    distanceFromVwapPct: number
   }
 }
 
@@ -123,6 +127,7 @@ function computeSignal(args: {
         oiDeltaPct: 0,
         fundingRate: args.funding?.rate ?? 0,
         oiChangeAbs: 0,
+        distanceFromVwapPct: 0,
       },
     }
   }
@@ -131,7 +136,8 @@ function computeSignal(args: {
 
   const priceVsVwapPct = ((lastK.close - lastV.vwap) / lastV.vwap) * 100
   const distanceFromVwapPct = Math.abs(priceVsVwapPct)
-const closeEnoughToVwap = distanceFromVwapPct <= 1
+  const closeEnoughToVwap = distanceFromVwapPct <= 1
+
   const cvdDelta = lastCvd.cvd - prevCvd.cvd
   const oiChangeAbs = lastOi.openInterest - prevOi.openInterest
   const oiDeltaPct =
@@ -142,8 +148,10 @@ const closeEnoughToVwap = distanceFromVwapPct <= 1
   const aboveVwap = lastK.close > lastV.vwap
   const belowVwap = lastK.close < lastV.vwap
 
-  const crossedAboveVwap = prevK.close <= prevV.vwap && lastK.close > lastV.vwap
-  const crossedBelowVwap = prevK.close >= prevV.vwap && lastK.close < lastV.vwap
+  const crossedAboveVwap =
+    prevK.close <= prevV.vwap && lastK.close > lastV.vwap
+  const crossedBelowVwap =
+    prevK.close >= prevV.vwap && lastK.close < lastV.vwap
 
   const reclaimAboveVwap = prevK.low < prevV.vwap && lastK.close > lastV.vwap
   const rejectBelowVwap = prevK.high > prevV.vwap && lastK.close < lastV.vwap
@@ -183,18 +191,44 @@ const closeEnoughToVwap = distanceFromVwapPct <= 1
   let sellScore = 0
   const reasons: string[] = []
 
- if (aboveVwap) {
-  buyScore += 1
-  reasons.push('Prix au-dessus de la VWAP.')
-}
+  if (!closeEnoughToVwap) {
+    return {
+      action: 'STABLE',
+      confidence: 1,
+      reasons: ['Prix trop éloigné de la VWAP (> 1%).'],
+      metrics: {
+        priceVsVwapPct,
+        cvdDelta,
+        oiDeltaPct,
+        fundingRate,
+        oiChangeAbs,
+        distanceFromVwapPct,
+      },
+    }
+  }
 
-if (!aboveVwap) {
-  buyScore = -999
-}
+  if (aboveVwap) {
+    buyScore += 1
+    reasons.push('Prix au-dessus de la VWAP.')
+  } else {
+    buyScore = -999
+  }
+
+  if (belowVwap) {
+    sellScore += 1
+    reasons.push('Prix sous la VWAP.')
+  } else {
+    sellScore = -999
+  }
 
   if (crossedAboveVwap || reclaimAboveVwap) {
     buyScore += 2
     reasons.push('Reprise / reclaim de la VWAP.')
+  }
+
+  if (crossedBelowVwap || rejectBelowVwap) {
+    sellScore += 2
+    reasons.push('Rejet / cassure sous la VWAP.')
   }
 
   if (cvdBullNow) {
@@ -202,19 +236,41 @@ if (!aboveVwap) {
     reasons.push('CVD haussier sur la dernière jambe.')
   }
 
+  if (cvdBearNow) {
+    sellScore += 1
+    reasons.push('CVD baissier sur la dernière jambe.')
+  }
+
   if (cvdBullDivergence) {
     buyScore += 2
-    reasons.push('Divergence haussière du CVD : pression vendeuse absorbée.')
+    reasons.push('Divergence haussière du CVD.')
+  }
+
+  if (cvdBearDivergence) {
+    sellScore += 2
+    reasons.push('Divergence baissière du CVD.')
   }
 
   if (oiRising) {
-    buyScore += 1
-    reasons.push('Open interest en hausse : nouvelles positions entrent.')
+    if (aboveVwap) {
+      buyScore += 1
+      reasons.push('OI en hausse dans un contexte haussier.')
+    }
+
+    if (belowVwap) {
+      sellScore += 1
+      reasons.push('OI en hausse dans un contexte baissier.')
+    }
   }
 
   if (oiFalling && aboveVwap) {
     buyScore += 1
-    reasons.push('OI en baisse avec reprise haussière : probable short covering.')
+    reasons.push('OI en baisse avec reprise haussière : short covering possible.')
+  }
+
+  if (oiFalling && belowVwap) {
+    sellScore += 1
+    reasons.push('OI en baisse avec faiblesse : long liquidation possible.')
   }
 
   if (bearishExpansion && crossedAboveVwap) {
@@ -222,54 +278,14 @@ if (!aboveVwap) {
     reasons.push('Trap short probable après expansion vendeuse puis reprise VWAP.')
   }
 
-  if (fundingTooHotLong) {
-    buyScore -= 1
-    reasons.push('Funding trop chaud côté long.')
-  }
-
-if (belowVwap) {
-  sellScore += 1
-  reasons.push('Prix sous la VWAP.')
-}
-
-if (!belowVwap) {
-  sellScore = -999
-}
-
-  if (!closeEnoughToVwap) {
-  reasons.push('Prix trop éloigné de la VWAP (> 1%).')
-  buyScore = -999
-  sellScore = -999
-}
-
-  if (crossedBelowVwap || rejectBelowVwap) {
-    sellScore += 2
-    reasons.push('Rejet / cassure sous la VWAP.')
-  }
-
-  if (cvdBearNow) {
-    sellScore += 1
-    reasons.push('CVD baissier sur la dernière jambe.')
-  }
-
-  if (cvdBearDivergence) {
-    sellScore += 2
-    reasons.push('Divergence baissière du CVD : pression acheteuse absorbée.')
-  }
-
-  if (oiRising) {
-    sellScore += 1
-    reasons.push('Open interest en hausse : nouvelles positions entrent.')
-  }
-
-  if (oiFalling && belowVwap) {
-    sellScore += 1
-    reasons.push('OI en baisse avec faiblesse du prix : probable long liquidation.')
-  }
-
   if (bullishExpansion && crossedBelowVwap) {
     sellScore += 2
     reasons.push('Trap long probable après expansion haussière puis perte VWAP.')
+  }
+
+  if (fundingTooHotLong) {
+    buyScore -= 1
+    reasons.push('Funding trop chaud côté long.')
   }
 
   if (fundingTooHotShort) {
@@ -288,6 +304,7 @@ if (!belowVwap) {
         oiDeltaPct,
         fundingRate,
         oiChangeAbs,
+        distanceFromVwapPct,
       },
     }
   }
@@ -303,6 +320,7 @@ if (!belowVwap) {
         oiDeltaPct,
         fundingRate,
         oiChangeAbs,
+        distanceFromVwapPct,
       },
     }
   }
@@ -318,6 +336,7 @@ if (!belowVwap) {
         oiDeltaPct,
         fundingRate,
         oiChangeAbs,
+        distanceFromVwapPct,
       },
     }
   }
@@ -333,6 +352,7 @@ if (!belowVwap) {
         oiDeltaPct,
         fundingRate,
         oiChangeAbs,
+        distanceFromVwapPct,
       },
     }
   }
@@ -348,6 +368,7 @@ if (!belowVwap) {
         oiDeltaPct,
         fundingRate,
         oiChangeAbs,
+        distanceFromVwapPct,
       },
     }
   }
@@ -363,6 +384,7 @@ if (!belowVwap) {
         oiDeltaPct,
         fundingRate,
         oiChangeAbs,
+        distanceFromVwapPct,
       },
     }
   }
@@ -377,6 +399,7 @@ if (!belowVwap) {
       oiDeltaPct,
       fundingRate,
       oiChangeAbs,
+      distanceFromVwapPct,
     },
   }
 }
@@ -401,39 +424,80 @@ export async function GET(req: NextRequest) {
     const vwap = calculateVWAP(klines, 200)
     const cvd = calculateCVD(trades, klines)
     const oi = buildOiSeriesForKlines(klines)
-    const signal = computeSignal({ klines, vwap, cvd, oi, funding })
-
-    if (
-  ticker &&
-  (signal.action === 'BUY' || signal.action === 'SELL') &&
-  signal.confidence >= 4 &&
-  !hasRecentDuplicate(signal.action, safeTimeframe, Date.now())
-) {
-  createSetup({
-    timestamp: Date.now(),
-    timeframe: safeTimeframe,
-    action: signal.action,
-    confidence: signal.confidence,
-    entryPrice: ticker.price,
-  })
-}
 
     evaluateOpenSetups(klines)
 
+    const signal = computeSignal({ klines, vwap, cvd, oi, funding })
+
+    const currentPosition = getCurrentPosition()
+    const lastReverseBarKey = getLastReverseBarKey()
+
+    const lastK = klines.at(-1)
+    const prevK = klines.at(-2)
+
+    const bullishStructureBreak =
+      !!lastK && !!prevK && lastK.close > prevK.high
+
+    const bearishStructureBreak =
+      !!lastK && !!prevK && lastK.close < prevK.low
+
+    const referenceBarKey = `${safeTimeframe}-${lastK?.time ?? 0}`
+
+    if (ticker && (signal.action === 'BUY' || signal.action === 'SELL')) {
+      if (!currentPosition) {
+        if (
+          signal.confidence >= 4 &&
+          !hasRecentDuplicate(signal.action, safeTimeframe, Date.now())
+        ) {
+          openPosition({
+            timestamp: Date.now(),
+            timeframe: safeTimeframe,
+            action: signal.action,
+            confidence: signal.confidence,
+            entryPrice: ticker.price,
+            referenceBarKey,
+          })
+        }
+      } else if (currentPosition.action !== signal.action) {
+        const structureOk =
+          signal.action === 'BUY'
+            ? bullishStructureBreak
+            : bearishStructureBreak
+
+        const canReverse =
+          signal.confidence >= 5 &&
+          signal.confidence > currentPosition.confidence &&
+          structureOk &&
+          lastReverseBarKey !== referenceBarKey
+
+        if (canReverse) {
+          reversePosition({
+            timestamp: Date.now(),
+            timeframe: safeTimeframe,
+            action: signal.action,
+            confidence: signal.confidence,
+            entryPrice: ticker.price,
+            referenceBarKey,
+          })
+        }
+      }
+    }
+
     return NextResponse.json({
-  klines,
-  vwap,
-  cvd,
-  oi,
-  ticker,
-  funding,
-  signal,
-  setupHistory: getRecentSetups(),
-  setupStats: getStats(),
-  sessionStats: getSessionStats(),
-  lastUpdate: Date.now(),
-  timeframe: safeTimeframe,
-})
+      klines,
+      vwap,
+      cvd,
+      oi,
+      ticker,
+      funding,
+      signal,
+      currentPosition: getCurrentPosition(),
+      setupHistory: getRecentSetups(),
+      setupStats: getStats(),
+      sessionStats: getSessionStats(),
+      lastUpdate: Date.now(),
+      timeframe: safeTimeframe,
+    })
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Unknown API route error'
@@ -448,9 +512,10 @@ export async function GET(req: NextRequest) {
         ticker: null,
         funding: null,
         signal: null,
+        currentPosition: getCurrentPosition(),
         setupHistory: getRecentSetups(),
-        sessionStats: getSessionStats(),
         setupStats: getStats(),
+        sessionStats: getSessionStats(),
         lastUpdate: Date.now(),
       },
       { status: 500 }
