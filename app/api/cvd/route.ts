@@ -30,6 +30,16 @@ type OIBar = {
 type SignalPayload = {
   action: 'BUY' | 'SELL' | 'STABLE'
   confidence: number
+  signalType:
+    | 'majority_trap_long'
+    | 'majority_trap_short'
+    | 'bullish_reset'
+    | 'bearish_reset'
+    | 'continuation_long'
+    | 'continuation_short'
+    | 'neutral'
+  marketRegime: 'trend' | 'range' | 'breakout' | 'reversal'
+  volatilityBucket: 'low' | 'medium' | 'high'
   reasons: string[]
   metrics: {
     priceVsVwapPct: number
@@ -82,6 +92,54 @@ function buildOiSeriesForKlines(klines: Array<{ time: number }>): OIBar[] {
   })
 }
 
+function getVolatilityBucket(
+  klines: Array<{ high: number; low: number; close: number }>
+): 'low' | 'medium' | 'high' {
+  const sample = klines.slice(-10)
+  if (!sample.length) return 'medium'
+
+  const avgRangePct =
+    sample.reduce((sum, k) => sum + ((k.high - k.low) / k.close) * 100, 0) /
+    sample.length
+
+  if (avgRangePct < 0.35) return 'low'
+  if (avgRangePct < 1) return 'medium'
+  return 'high'
+}
+
+function getMarketRegime(
+  klines: Array<{ high: number; low: number; close: number }>
+): 'trend' | 'range' | 'breakout' | 'reversal' {
+  const sample = klines.slice(-12)
+  if (sample.length < 4) return 'range'
+
+  const highs = sample.map((k) => k.high)
+  const lows = sample.map((k) => k.low)
+  const closes = sample.map((k) => k.close)
+
+  const maxHigh = Math.max(...highs)
+  const minLow = Math.min(...lows)
+  const rangePct = ((maxHigh - minLow) / closes.at(-1)!) * 100
+
+  const last = closes.at(-1)!
+  const prev = closes.at(-2)!
+  const prev2 = closes.at(-3)!
+
+  if (last > prev && prev > prev2 && rangePct > 1.2) return 'trend'
+  if (last < prev && prev < prev2 && rangePct > 1.2) return 'trend'
+
+  if (last > maxHigh * 0.998 || last < minLow * 1.002) return 'breakout'
+
+  if (
+    (last > prev && prev < prev2) ||
+    (last < prev && prev > prev2)
+  ) {
+    return 'reversal'
+  }
+
+  return 'range'
+}
+
 function computeSignal(args: {
   klines: Array<{ open: number; high: number; low: number; close: number }>
   vwap: Array<{ vwap: number }>
@@ -104,6 +162,9 @@ function computeSignal(args: {
   const prevOi = args.oi.at(-2)
   const prev2Oi = args.oi.at(-3)
 
+  const marketRegime = getMarketRegime(args.klines)
+  const volatilityBucket = getVolatilityBucket(args.klines)
+
   if (
     !lastK ||
     !prevK ||
@@ -120,6 +181,9 @@ function computeSignal(args: {
     return {
       action: 'STABLE',
       confidence: 1,
+      signalType: 'neutral',
+      marketRegime,
+      volatilityBucket,
       reasons: ['Pas assez de données pour lire un majority trap.'],
       metrics: {
         priceVsVwapPct: 0,
@@ -195,6 +259,9 @@ function computeSignal(args: {
     return {
       action: 'STABLE',
       confidence: 1,
+      signalType: 'neutral',
+      marketRegime,
+      volatilityBucket,
       reasons: ['Prix trop éloigné de la VWAP (> 1%).'],
       metrics: {
         priceVsVwapPct,
@@ -273,15 +340,24 @@ function computeSignal(args: {
     reasons.push('OI en baisse avec faiblesse : long liquidation possible.')
   }
 
+  let signalType: SignalPayload['signalType'] = 'neutral'
+
   if (bearishExpansion && crossedAboveVwap) {
     buyScore += 2
+    signalType = 'majority_trap_long'
     reasons.push('Trap short probable après expansion vendeuse puis reprise VWAP.')
   }
 
   if (bullishExpansion && crossedBelowVwap) {
     sellScore += 2
+    signalType = 'majority_trap_short'
     reasons.push('Trap long probable après expansion haussière puis perte VWAP.')
   }
+
+  if (crossedAboveVwap && signalType === 'neutral') signalType = 'bullish_reset'
+  if (crossedBelowVwap && signalType === 'neutral') signalType = 'bearish_reset'
+  if (cvdBullNow && aboveVwap && signalType === 'neutral') signalType = 'continuation_long'
+  if (cvdBearNow && belowVwap && signalType === 'neutral') signalType = 'continuation_short'
 
   if (fundingTooHotLong) {
     buyScore -= 1
@@ -297,6 +373,9 @@ function computeSignal(args: {
     return {
       action: 'BUY',
       confidence: 5,
+      signalType,
+      marketRegime,
+      volatilityBucket,
       reasons,
       metrics: {
         priceVsVwapPct,
@@ -313,6 +392,9 @@ function computeSignal(args: {
     return {
       action: 'SELL',
       confidence: 5,
+      signalType,
+      marketRegime,
+      volatilityBucket,
       reasons,
       metrics: {
         priceVsVwapPct,
@@ -329,6 +411,9 @@ function computeSignal(args: {
     return {
       action: 'BUY',
       confidence: 4,
+      signalType,
+      marketRegime,
+      volatilityBucket,
       reasons,
       metrics: {
         priceVsVwapPct,
@@ -345,6 +430,9 @@ function computeSignal(args: {
     return {
       action: 'SELL',
       confidence: 4,
+      signalType,
+      marketRegime,
+      volatilityBucket,
       reasons,
       metrics: {
         priceVsVwapPct,
@@ -361,6 +449,9 @@ function computeSignal(args: {
     return {
       action: 'BUY',
       confidence: 3,
+      signalType,
+      marketRegime,
+      volatilityBucket,
       reasons,
       metrics: {
         priceVsVwapPct,
@@ -377,6 +468,9 @@ function computeSignal(args: {
     return {
       action: 'SELL',
       confidence: 3,
+      signalType,
+      marketRegime,
+      volatilityBucket,
       reasons,
       metrics: {
         priceVsVwapPct,
@@ -392,6 +486,9 @@ function computeSignal(args: {
   return {
     action: 'STABLE',
     confidence: 2,
+    signalType: 'neutral',
+    marketRegime,
+    volatilityBucket,
     reasons: reasons.length ? reasons : ['Pas de majority trap net.'],
     metrics: {
       priceVsVwapPct,
@@ -456,6 +553,10 @@ export async function GET(req: NextRequest) {
             confidence: signal.confidence,
             entryPrice: ticker.price,
             referenceBarKey,
+            signalType: signal.signalType,
+            marketRegime: signal.marketRegime,
+            vwapDistancePct: signal.metrics.distanceFromVwapPct,
+            volatilityBucket: signal.volatilityBucket,
           })
         }
       } else if (currentPosition.action !== signal.action) {
@@ -478,6 +579,10 @@ export async function GET(req: NextRequest) {
             confidence: signal.confidence,
             entryPrice: ticker.price,
             referenceBarKey,
+            signalType: signal.signalType,
+            marketRegime: signal.marketRegime,
+            vwapDistancePct: signal.metrics.distanceFromVwapPct,
+            volatilityBucket: signal.volatilityBucket,
           })
         }
       }
