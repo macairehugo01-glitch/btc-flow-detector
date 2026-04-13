@@ -1,3 +1,5 @@
+import { loadJournalFile, saveJournalFile } from './journalPersistence'
+
 type SetupStatus = 'open' | 'win' | 'loss'
 export type SessionName = 'Asia' | 'London' | 'New York'
 export type Timeframe = '1m' | '5m' | '15m' | '1h'
@@ -78,9 +80,23 @@ export type SessionStats = {
   winrate: number
 }
 
-const setups: StoredSetup[] = []
-let currentPosition: LivePosition = null
-let lastReverseBarKey: string | null = null
+type PersistedState = {
+  setups: StoredSetup[]
+  currentPosition: LivePosition
+  lastReverseBarKey: string | null
+}
+
+const initialState: PersistedState = {
+  setups: [],
+  currentPosition: null,
+  lastReverseBarKey: null,
+}
+
+const state = loadJournalFile<PersistedState>(initialState)
+
+function persist() {
+  saveJournalFile(state)
+}
 
 function sessionFromTimestamp(tsMs: number): SessionName {
   const hour = new Date(tsMs).getUTCHours()
@@ -128,15 +144,15 @@ function computeRealizedR(setup: StoredSetup, exitPrice: number) {
 }
 
 export function getCurrentPosition() {
-  return currentPosition
+  return state.currentPosition
 }
 
 export function getLastReverseBarKey() {
-  return lastReverseBarKey
+  return state.lastReverseBarKey
 }
 
 export function getTradeJournal() {
-  return setups
+  return state.setups
 }
 
 export function hasRecentDuplicate(
@@ -144,7 +160,7 @@ export function hasRecentDuplicate(
   timeframe: Timeframe,
   timestamp: number
 ) {
-  return setups.some(
+  return state.setups.some(
     (s) =>
       s.action === action &&
       s.timeframe === timeframe &&
@@ -198,9 +214,9 @@ export function openPosition(input: {
     referenceBarKey: input.referenceBarKey,
   }
 
-  setups.unshift(setup)
+  state.setups.unshift(setup)
 
-  currentPosition = {
+  state.currentPosition = {
     setupId: setup.id,
     action: setup.action,
     entryPrice: setup.entryPrice,
@@ -212,6 +228,7 @@ export function openPosition(input: {
     referenceBarKey: setup.referenceBarKey,
   }
 
+  persist()
   return setup
 }
 
@@ -219,11 +236,12 @@ export function closeCurrentPositionAtMarket(
   timestamp: number,
   exitPrice: number
 ) {
-  if (!currentPosition) return
+  if (!state.currentPosition) return
 
-  const setup = setups.find((s) => s.id === currentPosition?.setupId)
+  const setup = state.setups.find((s) => s.id === state.currentPosition?.setupId)
   if (!setup || setup.status !== 'open') {
-    currentPosition = null
+    state.currentPosition = null
+    persist()
     return
   }
 
@@ -239,7 +257,8 @@ export function closeCurrentPositionAtMarket(
   )
   setup.status = realizedR >= 0 ? 'win' : 'loss'
 
-  currentPosition = null
+  state.currentPosition = null
+  persist()
 }
 
 export function reversePosition(input: {
@@ -256,14 +275,17 @@ export function reversePosition(input: {
   volatilityBucket: VolatilityBucket
 }) {
   closeCurrentPositionAtMarket(input.timestamp, input.entryPrice)
-  lastReverseBarKey = input.referenceBarKey
+  state.lastReverseBarKey = input.referenceBarKey
+  persist()
   return openPosition(input)
 }
 
 export function evaluateOpenSetups(
   klines: Array<{ time: number; high: number; low: number }>
 ) {
-  for (const setup of setups) {
+  let changed = false
+
+  for (const setup of state.setups) {
     if (setup.status !== 'open') continue
 
     const candlesAfterEntry = klines.filter(
@@ -275,109 +297,57 @@ export function evaluateOpenSetups(
         const hitSl = candle.low <= setup.stopLoss
         const hitTp = candle.high >= setup.takeProfit
 
-        if (hitSl && hitTp) {
-          setup.status = 'loss'
-          setup.exitPrice = setup.stopLoss
-          setup.rMultiple = -1
-          setup.drawdownR = 1
+        if (hitSl || hitTp) {
+          setup.status = hitTp ? 'win' : 'loss'
+          setup.exitPrice = hitTp ? setup.takeProfit : setup.stopLoss
+          setup.rMultiple = hitTp ? setup.rr : -1
+          setup.drawdownR = hitTp ? 0 : 1
           setup.closedAt = candle.time * 1000
           setup.durationMinutes = Math.max(
             0,
             (setup.closedAt - setup.timestamp) / 1000 / 60
           )
-          if (currentPosition?.setupId === setup.id) currentPosition = null
-          break
-        }
-
-        if (hitSl) {
-          setup.status = 'loss'
-          setup.exitPrice = setup.stopLoss
-          setup.rMultiple = -1
-          setup.drawdownR = 1
-          setup.closedAt = candle.time * 1000
-          setup.durationMinutes = Math.max(
-            0,
-            (setup.closedAt - setup.timestamp) / 1000 / 60
-          )
-          if (currentPosition?.setupId === setup.id) currentPosition = null
-          break
-        }
-
-        if (hitTp) {
-          setup.status = 'win'
-          setup.exitPrice = setup.takeProfit
-          setup.rMultiple = setup.rr
-          setup.drawdownR = 0
-          setup.closedAt = candle.time * 1000
-          setup.durationMinutes = Math.max(
-            0,
-            (setup.closedAt - setup.timestamp) / 1000 / 60
-          )
-          if (currentPosition?.setupId === setup.id) currentPosition = null
+          if (state.currentPosition?.setupId === setup.id) state.currentPosition = null
+          changed = true
           break
         }
       } else {
         const hitSl = candle.high >= setup.stopLoss
         const hitTp = candle.low <= setup.takeProfit
 
-        if (hitSl && hitTp) {
-          setup.status = 'loss'
-          setup.exitPrice = setup.stopLoss
-          setup.rMultiple = -1
-          setup.drawdownR = 1
+        if (hitSl || hitTp) {
+          setup.status = hitTp ? 'win' : 'loss'
+          setup.exitPrice = hitTp ? setup.takeProfit : setup.stopLoss
+          setup.rMultiple = hitTp ? setup.rr : -1
+          setup.drawdownR = hitTp ? 0 : 1
           setup.closedAt = candle.time * 1000
           setup.durationMinutes = Math.max(
             0,
             (setup.closedAt - setup.timestamp) / 1000 / 60
           )
-          if (currentPosition?.setupId === setup.id) currentPosition = null
-          break
-        }
-
-        if (hitSl) {
-          setup.status = 'loss'
-          setup.exitPrice = setup.stopLoss
-          setup.rMultiple = -1
-          setup.drawdownR = 1
-          setup.closedAt = candle.time * 1000
-          setup.durationMinutes = Math.max(
-            0,
-            (setup.closedAt - setup.timestamp) / 1000 / 60
-          )
-          if (currentPosition?.setupId === setup.id) currentPosition = null
-          break
-        }
-
-        if (hitTp) {
-          setup.status = 'win'
-          setup.exitPrice = setup.takeProfit
-          setup.rMultiple = setup.rr
-          setup.drawdownR = 0
-          setup.closedAt = candle.time * 1000
-          setup.durationMinutes = Math.max(
-            0,
-            (setup.closedAt - setup.timestamp) / 1000 / 60
-          )
-          if (currentPosition?.setupId === setup.id) currentPosition = null
+          if (state.currentPosition?.setupId === setup.id) state.currentPosition = null
+          changed = true
           break
         }
       }
     }
   }
+
+  if (changed) persist()
 }
 
 export function getRecentSetups() {
-  return setups.slice(0, 25)
+  return state.setups.slice(0, 25)
 }
 
 export function getStats(): SetupStats {
-  const wins = setups.filter((s) => s.status === 'win').length
-  const losses = setups.filter((s) => s.status === 'loss').length
-  const open = setups.filter((s) => s.status === 'open').length
+  const wins = state.setups.filter((s) => s.status === 'win').length
+  const losses = state.setups.filter((s) => s.status === 'loss').length
+  const open = state.setups.filter((s) => s.status === 'open').length
   const totalClosed = wins + losses
 
   return {
-    total: setups.length,
+    total: state.setups.length,
     wins,
     losses,
     open,
@@ -389,7 +359,7 @@ export function getSessionStats(): SessionStats[] {
   const sessions: SessionName[] = ['Asia', 'London', 'New York']
 
   return sessions.map((session) => {
-    const filtered = setups.filter((s) => s.session === session)
+    const filtered = state.setups.filter((s) => s.session === session)
     const wins = filtered.filter((s) => s.status === 'win').length
     const losses = filtered.filter((s) => s.status === 'loss').length
     const open = filtered.filter((s) => s.status === 'open').length
