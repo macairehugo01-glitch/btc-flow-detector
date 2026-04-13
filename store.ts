@@ -15,7 +15,20 @@ type StoredSetup = {
   rr: number
   status: SetupStatus
   closedAt?: number
+  referenceBarKey: string
 }
+
+type LivePosition = {
+  setupId: string
+  action: 'BUY' | 'SELL'
+  entryPrice: number
+  stopLoss: number
+  takeProfit: number
+  openedAt: number
+  timeframe: Timeframe
+  confidence: number
+  referenceBarKey: string
+} | null
 
 type SetupStats = {
   total: number
@@ -35,6 +48,8 @@ type SessionStats = {
 }
 
 const setups: StoredSetup[] = []
+let currentPosition: LivePosition = null
+let lastReverseBarKey: string | null = null
 
 function sessionFromTimestamp(tsMs: number): SessionName {
   const hour = new Date(tsMs).getUTCHours()
@@ -44,40 +59,31 @@ function sessionFromTimestamp(tsMs: number): SessionName {
   return 'New York'
 }
 
-export function createSetup(input: {
-  timestamp: number
-  timeframe: Timeframe
-  action: 'BUY' | 'SELL'
-  confidence: number
-  entryPrice: number
-}) {
-  const move = input.entryPrice * 0.002
+function buildRiskLevels(entryPrice: number, action: 'BUY' | 'SELL') {
+  const riskMove = entryPrice * 0.002
   const rr = 2
 
   const stopLoss =
-    input.action === 'BUY' ? input.entryPrice - move : input.entryPrice + move
+    action === 'BUY' ? entryPrice - riskMove : entryPrice + riskMove
 
   const takeProfit =
-    input.action === 'BUY'
-      ? input.entryPrice + move * rr
-      : input.entryPrice - move * rr
+    action === 'BUY'
+      ? entryPrice + riskMove * rr
+      : entryPrice - riskMove * rr
 
-  const setup: StoredSetup = {
-    id: `${input.action}-${input.timeframe}-${input.timestamp}`,
-    timestamp: input.timestamp,
-    session: sessionFromTimestamp(input.timestamp),
-    timeframe: input.timeframe,
-    action: input.action,
-    confidence: input.confidence,
-    entryPrice: input.entryPrice,
+  return {
     stopLoss,
     takeProfit,
     rr,
-    status: 'open',
   }
+}
 
-  setups.unshift(setup)
-  return setup
+export function getCurrentPosition() {
+  return currentPosition
+}
+
+export function getLastReverseBarKey() {
+  return lastReverseBarKey
 }
 
 export function hasRecentDuplicate(
@@ -91,6 +97,87 @@ export function hasRecentDuplicate(
       s.timeframe === timeframe &&
       Math.abs(s.timestamp - timestamp) < 5 * 60 * 1000
   )
+}
+
+export function openPosition(input: {
+  timestamp: number
+  timeframe: Timeframe
+  action: 'BUY' | 'SELL'
+  confidence: number
+  entryPrice: number
+  referenceBarKey: string
+}) {
+  const { stopLoss, takeProfit, rr } = buildRiskLevels(
+    input.entryPrice,
+    input.action
+  )
+
+  const setup: StoredSetup = {
+    id: `${input.action}-${input.timeframe}-${input.timestamp}`,
+    timestamp: input.timestamp,
+    session: sessionFromTimestamp(input.timestamp),
+    timeframe: input.timeframe,
+    action: input.action,
+    confidence: input.confidence,
+    entryPrice: input.entryPrice,
+    stopLoss,
+    takeProfit,
+    rr,
+    status: 'open',
+    referenceBarKey: input.referenceBarKey,
+  }
+
+  setups.unshift(setup)
+
+  currentPosition = {
+    setupId: setup.id,
+    action: setup.action,
+    entryPrice: setup.entryPrice,
+    stopLoss: setup.stopLoss,
+    takeProfit: setup.takeProfit,
+    openedAt: setup.timestamp,
+    timeframe: setup.timeframe,
+    confidence: setup.confidence,
+    referenceBarKey: setup.referenceBarKey,
+  }
+
+  return setup
+}
+
+export function closeCurrentPositionAtMarket(
+  timestamp: number,
+  exitPrice: number
+) {
+  if (!currentPosition) return
+
+  const setup = setups.find((s) => s.id === currentPosition?.setupId)
+  if (!setup || setup.status !== 'open') {
+    currentPosition = null
+    return
+  }
+
+  const isWin =
+    setup.action === 'BUY'
+      ? exitPrice >= setup.entryPrice
+      : exitPrice <= setup.entryPrice
+
+  setup.status = isWin ? 'win' : 'loss'
+  setup.closedAt = timestamp
+
+  currentPosition = null
+}
+
+export function reversePosition(input: {
+  timestamp: number
+  timeframe: Timeframe
+  action: 'BUY' | 'SELL'
+  confidence: number
+  entryPrice: number
+  referenceBarKey: string
+}) {
+  closeCurrentPositionAtMarket(input.timestamp, input.entryPrice)
+  lastReverseBarKey = input.referenceBarKey
+  return openPosition(input)
 }
 
 export function evaluateOpenSetups(
@@ -111,18 +198,21 @@ export function evaluateOpenSetups(
         if (hitSl && hitTp) {
           setup.status = 'loss'
           setup.closedAt = candle.time * 1000
+          if (currentPosition?.setupId === setup.id) currentPosition = null
           break
         }
 
         if (hitSl) {
           setup.status = 'loss'
           setup.closedAt = candle.time * 1000
+          if (currentPosition?.setupId === setup.id) currentPosition = null
           break
         }
 
         if (hitTp) {
           setup.status = 'win'
           setup.closedAt = candle.time * 1000
+          if (currentPosition?.setupId === setup.id) currentPosition = null
           break
         }
       } else {
@@ -132,18 +222,21 @@ export function evaluateOpenSetups(
         if (hitSl && hitTp) {
           setup.status = 'loss'
           setup.closedAt = candle.time * 1000
+          if (currentPosition?.setupId === setup.id) currentPosition = null
           break
         }
 
         if (hitSl) {
           setup.status = 'loss'
           setup.closedAt = candle.time * 1000
+          if (currentPosition?.setupId === setup.id) currentPosition = null
           break
         }
 
         if (hitTp) {
           setup.status = 'win'
           setup.closedAt = candle.time * 1000
+          if (currentPosition?.setupId === setup.id) currentPosition = null
           break
         }
       }
