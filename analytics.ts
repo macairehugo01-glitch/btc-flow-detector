@@ -1,4 +1,4 @@
-import type { MarketRegime, SessionName, SignalType, StoredSetup, Timeframe } from './store'
+import type { StoredSetup } from './store'
 
 export type AnalyticsRow = {
   label: string
@@ -237,22 +237,24 @@ function buildHeatmap(journal: StoredSetup[]): HeatmapCell[] {
 }
 
 export function getAnalyticsSnapshot(journal: StoredSetup[]): AnalyticsSnapshot {
+  const equityCurve = buildEquityCurve(journal)
+
   return {
     overview: buildRow('Overview', journal),
 
     byHour: groupByLabel(journal, (t) => t.hourBucket),
-    bySession: groupByLabel(journal, (t) => t.session as SessionName),
+    bySession: groupByLabel(journal, (t) => t.session),
     byDirection: groupByLabel(journal, (t) => t.action),
-    byTimeframe: groupByLabel(journal, (t) => t.timeframe as Timeframe),
+    byTimeframe: groupByLabel(journal, (t) => t.timeframe),
     byConfidence: groupByLabel(journal, (t) => `${t.confidence}/5`),
     byDuration: groupByLabel(journal, (t) => durationBucket(t.durationMinutes)),
     byVWAPDistance: groupByLabel(journal, (t) => vwapDistanceBucket(t.vwapDistancePct)),
-    byRegime: groupByLabel(journal, (t) => t.marketRegime as MarketRegime),
+    byRegime: groupByLabel(journal, (t) => t.marketRegime),
     byWeekday: groupByLabel(journal, (t) => t.weekday),
-    bySignalType: groupByLabel(journal, (t) => t.signalType as SignalType),
+    bySignalType: groupByLabel(journal, (t) => t.signalType),
 
-    equityCurve: buildEquityCurve(journal),
-    drawdown: buildDrawdown(buildEquityCurve(journal)),
+    equityCurve,
+    drawdown: buildDrawdown(equityCurve),
     streaks: buildStreaks(journal),
     heatmap: buildHeatmap(journal),
   }
