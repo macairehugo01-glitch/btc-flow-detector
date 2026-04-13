@@ -32,16 +32,43 @@ export type OIBar = {
 export type StoredSetup = {
   id: string
   timestamp: number
+  closedAt?: number
+
   session: 'Asia' | 'London' | 'New York'
+  weekday: 'Mon' | 'Tue' | 'Wed' | 'Thu' | 'Fri' | 'Sat' | 'Sun'
+  hourBucket: string
+
   timeframe: Timeframe
   action: 'BUY' | 'SELL'
   confidence: number
+
+  signalType:
+    | 'majority_trap_long'
+    | 'majority_trap_short'
+    | 'bullish_reset'
+    | 'bearish_reset'
+    | 'continuation_long'
+    | 'continuation_short'
+    | 'neutral'
+
+  marketRegime: 'trend' | 'range' | 'breakout' | 'reversal'
+  vwapSide: 'above' | 'below'
+  vwapDistancePct: number
+  volatilityBucket: 'low' | 'medium' | 'high'
+
   entryPrice: number
   stopLoss: number
   takeProfit: number
   rr: number
+  riskPercent: number
+
   status: 'open' | 'win' | 'loss'
-  closedAt?: number
+  exitPrice?: number
+  rMultiple?: number
+  drawdownR?: number
+  durationMinutes?: number
+
+  referenceBarKey: string
 }
 
 export type SetupStats = {
@@ -68,6 +95,16 @@ export type Thresholds = {
 export type TradeSignal = {
   action: 'BUY' | 'SELL' | 'STABLE'
   confidence: number
+  signalType:
+    | 'majority_trap_long'
+    | 'majority_trap_short'
+    | 'bullish_reset'
+    | 'bearish_reset'
+    | 'continuation_long'
+    | 'continuation_short'
+    | 'neutral'
+  marketRegime: 'trend' | 'range' | 'breakout' | 'reversal'
+  volatilityBucket: 'low' | 'medium' | 'high'
   reasons: string[]
   metrics: {
     priceVsVwapPct: number
@@ -75,6 +112,7 @@ export type TradeSignal = {
     oiDeltaPct: number
     fundingRate: number
     oiChangeAbs: number
+    distanceFromVwapPct: number
   }
 }
 
