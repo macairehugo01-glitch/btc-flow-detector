@@ -10,9 +10,9 @@ import OIStatsPanel from '../OIStatsPanel'
 import TradeSignalPanel from '../TradeSignalPanel'
 import ConditionsChecklist from '../ConditionsChecklist'
 import EconomicCalendarPanel from '../EconomicCalendarPanel'
+import AnalyticsPanel from '../AnalyticsPanel'
 import { useMarketData } from '../useMarketData'
 import { useMarketStore } from '../useMarketStore'
-import AnalyticsPanel from '../AnalyticsPanel'
 
 export default function Page() {
   const { refresh } = useMarketData()
@@ -94,6 +94,9 @@ export default function Page() {
             </div>
 
             <SetupHistory />
+
+            {/* NOUVEAU BLOC ANALYTICS */}
+            <AnalyticsPanel />
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
