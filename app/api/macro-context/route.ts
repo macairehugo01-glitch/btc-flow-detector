@@ -11,6 +11,29 @@ type Macro = {
   bias: 'bullish' | 'bearish' | 'neutral'
 }
 
+async function fetchText(url: string, timeoutMs = 8000) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const res = await fetch(url, {
+      cache: 'no-store',
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      signal: controller.signal,
+    })
+
+    const text = await res.text()
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`)
+    return text
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function fetchJSON(url: string) {
   try {
     const res = await fetch(url, { cache: 'no-store' })
@@ -21,73 +44,62 @@ async function fetchJSON(url: string) {
   }
 }
 
-async function fetchYahoo(symbol: string) {
-  try {
-    const res = await fetch(
-      `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbol)}`,
-      { cache: 'no-store' }
-    )
+function parseDxyFromStooq(html: string) {
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
 
-    if (!res.ok) return null
+  const liveMatch = text.match(
+    /\b\d{1,2}\s\w{3},\s\d{2}:\d{2}\s+([0-9]+(?:\.[0-9]+)?)\s+([+-]?[0-9]+(?:\.[0-9]+)?)\s+\(([+-]?[0-9]+(?:\.[0-9]+)?)%\)/
+  )
 
-    const json = await res.json()
-    const result = json?.quoteResponse?.result?.[0]
-
-    if (!result) return null
-
+  if (liveMatch) {
     return {
-      price:
-        typeof result.regularMarketPrice === 'number'
-          ? result.regularMarketPrice
-          : null,
-      change:
-        typeof result.regularMarketChange === 'number'
-          ? result.regularMarketChange
-          : null,
+      price: Number(liveMatch[1]),
+      change: Number(liveMatch[2]),
     }
-  } catch {
-    return null
+  }
+
+  const histMatch = text.match(
+    /\b\d{1,2}\s\w{3}\s20\d{2}\s[0-9.]+\s[0-9.]+\s[0-9.]+\s([0-9.]+)\s([+-]?[0-9.]+)/
+  )
+
+  if (histMatch) {
+    return {
+      price: Number(histMatch[1]),
+      change: Number(histMatch[2]),
+    }
+  }
+
+  return null
+}
+
+function parseFredObservations(html: string) {
+  const matches = [...html.matchAll(/20\d{2}-\d{2}-\d{2}:\s*([0-9]+(?:\.[0-9]+)?)/g)]
+    .map((m) => Number(m[1]))
+    .filter((n) => !Number.isNaN(n))
+
+  return {
+    latest: matches[0] ?? null,
+    previous: matches[1] ?? null,
   }
 }
 
 export async function GET() {
   try {
-    const [dxyRaw, vixRaw, us10yRes] = await Promise.all([
-      fetchYahoo('DX-Y.NYB'),
-      fetchYahoo('^VIX'),
+    const [dxyHtml, vixHtml, us10yRes] = await Promise.all([
+      fetchText('https://stooq.com/q/d/?s=dx.f').catch(() => null),
+      fetchText('https://fred.stlouisfed.org/series/VIXCLS').catch(() => null),
       fetchJSON(
         `https://www.alphavantage.co/query?function=TREASURY_YIELD&interval=daily&maturity=10year&apikey=${API_KEY}`
       ),
     ])
 
-    const dxy: Macro = {
-      label: 'DXY',
-      value: dxyRaw?.price ?? null,
-      change: dxyRaw?.change ?? null,
-      bias:
-        dxyRaw?.change == null
-          ? 'neutral'
-          : dxyRaw.change < 0
-          ? 'bullish'
-          : 'bearish',
-    }
-
-    const vixPrice = vixRaw?.price ?? null
-    const vixChange = vixRaw?.change ?? null
-
-    const vix: Macro = {
-      label: 'VIX',
-      value: vixPrice,
-      change: vixChange,
-      bias:
-        vixPrice == null
-          ? 'neutral'
-          : vixPrice < 15
-          ? 'bullish'
-          : vixPrice > 25
-          ? 'bearish'
-          : 'neutral',
-    }
+    const dxyParsed = dxyHtml ? parseDxyFromStooq(dxyHtml) : null
+    const vixParsed = vixHtml ? parseFredObservations(vixHtml) : { latest: null, previous: null }
 
     const us10yValue =
       typeof us10yRes?.data?.[0]?.value === 'string' ||
@@ -103,6 +115,37 @@ export async function GET() {
 
     const us10yChange =
       us10yValue != null && us10yPrev != null ? us10yValue - us10yPrev : null
+
+    const dxy: Macro = {
+      label: 'DXY',
+      value: dxyParsed?.price ?? null,
+      change: dxyParsed?.change ?? null,
+      bias:
+        dxyParsed?.change == null
+          ? 'neutral'
+          : dxyParsed.change < 0
+          ? 'bullish'
+          : 'bearish',
+    }
+
+    const vixChange =
+      vixParsed.latest != null && vixParsed.previous != null
+        ? vixParsed.latest - vixParsed.previous
+        : null
+
+    const vix: Macro = {
+      label: 'VIX',
+      value: vixParsed.latest,
+      change: vixChange,
+      bias:
+        vixParsed.latest == null
+          ? 'neutral'
+          : vixParsed.latest < 15
+          ? 'bullish'
+          : vixParsed.latest > 25
+          ? 'bearish'
+          : 'neutral',
+    }
 
     const us10y: Macro = {
       label: 'US10Y',
@@ -132,14 +175,14 @@ export async function GET() {
       macroBias,
       lastUpdate: Date.now(),
     })
-  } catch {
+  } catch (error) {
     return NextResponse.json({
-      dxy: null,
-      vix: null,
-      us10y: null,
+      dxy: { label: 'DXY', value: null, change: null, bias: 'neutral' },
+      vix: { label: 'VIX', value: null, change: null, bias: 'neutral' },
+      us10y: { label: 'US10Y', value: null, change: null, bias: 'neutral' },
       macroScore: 0,
       macroBias: 'NEUTRAL',
-      error: 'Macro fetch failed',
+      error: error instanceof Error ? error.message : 'Macro fetch failed',
       lastUpdate: Date.now(),
     })
   }
