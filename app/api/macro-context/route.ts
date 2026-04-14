@@ -14,7 +14,37 @@ type Macro = {
 async function fetchJSON(url: string) {
   try {
     const res = await fetch(url, { cache: 'no-store' })
+    if (!res.ok) return null
     return await res.json()
+  } catch {
+    return null
+  }
+}
+
+async function fetchYahoo(symbol: string) {
+  try {
+    const res = await fetch(
+      `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbol)}`,
+      { cache: 'no-store' }
+    )
+
+    if (!res.ok) return null
+
+    const json = await res.json()
+    const result = json?.quoteResponse?.result?.[0]
+
+    if (!result) return null
+
+    return {
+      price:
+        typeof result.regularMarketPrice === 'number'
+          ? result.regularMarketPrice
+          : null,
+      change:
+        typeof result.regularMarketChange === 'number'
+          ? result.regularMarketChange
+          : null,
+    }
   } catch {
     return null
   }
@@ -22,19 +52,28 @@ async function fetchJSON(url: string) {
 
 export async function GET() {
   try {
-    const [vixRes, us10yRes] = await Promise.all([
-      fetchJSON(
-        `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=^VIX&apikey=${API_KEY}`
-      ),
+    const [dxyRaw, vixRaw, us10yRes] = await Promise.all([
+      fetchYahoo('DX-Y.NYB'),
+      fetchYahoo('^VIX'),
       fetchJSON(
         `https://www.alphavantage.co/query?function=TREASURY_YIELD&interval=daily&maturity=10year&apikey=${API_KEY}`
       ),
     ])
 
-    // VIX
-    const vixPrice = Number(vixRes?.['Global Quote']?.['05. price']) || null
-    const vixChange =
-      Number(vixRes?.['Global Quote']?.['09. change']) || null
+    const dxy: Macro = {
+      label: 'DXY',
+      value: dxyRaw?.price ?? null,
+      change: dxyRaw?.change ?? null,
+      bias:
+        dxyRaw?.change == null
+          ? 'neutral'
+          : dxyRaw.change < 0
+          ? 'bullish'
+          : 'bearish',
+    }
+
+    const vixPrice = vixRaw?.price ?? null
+    const vixChange = vixRaw?.change ?? null
 
     const vix: Macro = {
       label: 'VIX',
@@ -50,14 +89,20 @@ export async function GET() {
           : 'neutral',
     }
 
-    // US10Y
     const us10yValue =
-      Number(us10yRes?.data?.[0]?.value) || null
+      typeof us10yRes?.data?.[0]?.value === 'string' ||
+      typeof us10yRes?.data?.[0]?.value === 'number'
+        ? Number(us10yRes.data[0].value)
+        : null
+
     const us10yPrev =
-      Number(us10yRes?.data?.[1]?.value) || null
+      typeof us10yRes?.data?.[1]?.value === 'string' ||
+      typeof us10yRes?.data?.[1]?.value === 'number'
+        ? Number(us10yRes.data[1].value)
+        : null
 
     const us10yChange =
-      us10yValue && us10yPrev ? us10yValue - us10yPrev : null
+      us10yValue != null && us10yPrev != null ? us10yValue - us10yPrev : null
 
     const us10y: Macro = {
       label: 'US10Y',
@@ -71,33 +116,6 @@ export async function GET() {
           : 'bearish',
     }
 
-    // DXY proxy simple (EURUSD inverse)
-    const eurusdRes = await fetchJSON(
-      `https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency=EUR&to_currency=USD&apikey=${API_KEY}`
-    )
-
-    const eurusd =
-      Number(
-        eurusdRes?.['Realtime Currency Exchange Rate']?.[
-          '5. Exchange Rate'
-        ]
-      ) || null
-
-    const dxy: Macro = {
-      label: 'DXY (proxy)',
-      value: eurusd,
-      change: null,
-      bias:
-        eurusd == null
-          ? 'neutral'
-          : eurusd > 1.08
-          ? 'bearish' // USD weak
-          : eurusd < 1.06
-          ? 'bullish' // USD strong
-          : 'neutral',
-    }
-
-    // SCORE
     const score =
       (dxy.bias === 'bullish' ? 1 : dxy.bias === 'bearish' ? -1 : 0) +
       (vix.bias === 'bullish' ? 1 : vix.bias === 'bearish' ? -1 : 0) +
@@ -114,11 +132,15 @@ export async function GET() {
       macroBias,
       lastUpdate: Date.now(),
     })
-  } catch (err) {
+  } catch {
     return NextResponse.json({
-      error: 'Macro fetch failed',
+      dxy: null,
+      vix: null,
+      us10y: null,
       macroScore: 0,
       macroBias: 'NEUTRAL',
+      error: 'Macro fetch failed',
+      lastUpdate: Date.now(),
     })
   }
 }
