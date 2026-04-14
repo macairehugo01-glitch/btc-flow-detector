@@ -32,23 +32,7 @@ export default function MacroPanel() {
     )
   }
 
-  if (error || !data) {
-    return (
-      <div
-        style={{
-          background: 'var(--bg-card)',
-          border: '1px solid var(--bg-border)',
-          borderRadius: 12,
-          padding: 16,
-          color: 'var(--accent-red)',
-        }}
-      >
-        ⚠ {error || 'No macro data'}
-      </div>
-    )
-  }
-
-  const rows = [data.dxy, data.vix, data.us10y].filter(Boolean)
+  const rows = [data?.dxy, data?.vix, data?.us10y].filter(Boolean)
 
   return (
     <div
@@ -88,12 +72,24 @@ export default function MacroPanel() {
             fontSize: 12,
             fontFamily: 'monospace',
             fontWeight: 700,
-            color: scoreColor(data.macroScore),
+            color: scoreColor(data?.macroScore ?? 0),
           }}
         >
-          {data.macroBias} ({data.macroScore})
+          {data?.macroBias ?? 'NEUTRAL'} ({data?.macroScore ?? 0})
         </div>
       </div>
+
+      {error && (
+        <div
+          style={{
+            color: 'var(--accent-red)',
+            fontSize: 12,
+            fontFamily: 'monospace',
+          }}
+        >
+          ⚠ {error}
+        </div>
+      )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {rows.map((row) => (
