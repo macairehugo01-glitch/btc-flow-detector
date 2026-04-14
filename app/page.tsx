@@ -94,6 +94,9 @@ export default function Page() {
             </div>
 
             <SetupHistory />
+            <div style={{ color: 'white', padding: 20, border: '1px solid red' }}>
+  TEST ANALYTICS
+</div>
 
             {/* NOUVEAU BLOC ANALYTICS */}
             <AnalyticsPanel />
