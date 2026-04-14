@@ -1,6 +1,7 @@
 'use client'
 
 import { useAnalytics, type AnalyticsRow } from './useAnalytics'
+import HeatmapPanel from './HeatmapPanel'
 
 function Table({
   title,
@@ -61,7 +62,10 @@ function Table({
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.label} style={{ borderBottom: '1px solid var(--bg-border)' }}>
+              <tr
+                key={r.label}
+                style={{ borderBottom: '1px solid var(--bg-border)' }}
+              >
                 <td style={{ padding: '8px 12px 8px 0' }}>{r.label}</td>
                 <td style={{ paddingRight: 12 }}>{r.trades}</td>
                 <td style={{ paddingRight: 12 }}>{r.winrate.toFixed(1)}%</td>
@@ -233,7 +237,9 @@ export default function AnalyticsPanel() {
             Streaks
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div
+            style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}
+          >
             <div>Max Win Streak: {analytics.streaks.maxWinStreak}</div>
             <div>Max Loss Streak: {analytics.streaks.maxLossStreak}</div>
             <div>Current Win Streak: {analytics.streaks.currentWinStreak}</div>
@@ -261,12 +267,16 @@ export default function AnalyticsPanel() {
             Drawdown
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div
+            style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}
+          >
             <div>Max DD: {analytics.drawdown.maxDrawdownR.toFixed(2)}R</div>
             <div>Current DD: {analytics.drawdown.currentDrawdownR.toFixed(2)}R</div>
           </div>
         </div>
       </div>
+
+      <HeatmapPanel heatmap={analytics.heatmap} />
     </div>
   )
 }
