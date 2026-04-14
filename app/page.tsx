@@ -12,6 +12,7 @@ import ConditionsChecklist from '../ConditionsChecklist'
 import EconomicCalendarPanel from '../EconomicCalendarPanel'
 import { useMarketData } from '../useMarketData'
 import { useMarketStore } from '../useMarketStore'
+import AnalyticsPanel from '../AnalyticsPanel'
 
 export default function Page() {
   const { refresh } = useMarketData()
