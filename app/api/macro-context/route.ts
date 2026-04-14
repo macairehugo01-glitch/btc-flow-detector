@@ -12,39 +12,59 @@ type MacroSeriesPoint = {
   interpretation: string
 }
 
-function extractObservations(html: string): number[] {
-  const matches = [...html.matchAll(/202\d-\d\d-\d\d:\s*([0-9]+(?:\.[0-9]+)?)/g)]
-  return matches
-    .map((m) => Number(m[1]))
-    .filter((n) => !Number.isNaN(n))
-}
-
-async function fetchFredSeries(url: string) {
-  const res = await fetch(url, {
-    cache: 'no-store',
-    headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36',
-      Accept: 'text/html,application/xhtml+xml',
-    },
-  })
-
-  const html = await res.text()
-
-  if (!res.ok) {
-    throw new Error(`Macro source error ${res.status}: ${html.slice(0, 200)}`)
-  }
-
-  const values = extractObservations(html)
-  return {
-    latest: values[0] ?? null,
-    previous: values[1] ?? null,
-  }
-}
-
 function buildChange(latest: number | null, previous: number | null) {
   if (latest == null || previous == null) return null
   return latest - previous
+}
+
+function parseFredHtmlValue(html: string): { latest: number | null; previous: number | null } {
+  const matches = [...html.matchAll(/20\d{2}-\d{2}-\d{2}:\s*([0-9]+(?:\.[0-9]+)?)/g)]
+    .map((m) => Number(m[1]))
+    .filter((n) => !Number.isNaN(n))
+
+  return {
+    latest: matches[0] ?? null,
+    previous: matches[1] ?? null,
+  }
+}
+
+async function fetchWithTimeout(url: string, timeoutMs = 8000) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const res = await fetch(url, {
+      cache: 'no-store',
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      signal: controller.signal,
+    })
+
+    const text = await res.text()
+
+    if (!res.ok) {
+      throw new Error(`Source ${res.status}: ${text.slice(0, 200)}`)
+    }
+
+    return text
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function fetchFredSeries(url: string) {
+  try {
+    const html = await fetchWithTimeout(url, 8000)
+    return parseFredHtmlValue(html)
+  } catch {
+    return {
+      latest: null,
+      previous: null,
+    }
+  }
 }
 
 export async function GET() {
@@ -132,20 +152,38 @@ export async function GET() {
       lastUpdate: Date.now(),
     })
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : 'Unknown macro context error'
-
-    return NextResponse.json(
-      {
-        error: message,
-        dxy: null,
-        vix: null,
-        us10y: null,
-        macroScore: 0,
-        macroBias: 'NEUTRAL',
-        lastUpdate: Date.now(),
+    return NextResponse.json({
+      dxy: {
+        label: 'DXY Broad',
+        value: null,
+        previous: null,
+        change: null,
+        unit: 'index',
+        bias: 'neutral',
+        interpretation: 'Unavailable',
       },
-      { status: 500 }
-    )
+      vix: {
+        label: 'VIX',
+        value: null,
+        previous: null,
+        change: null,
+        unit: 'index',
+        bias: 'neutral',
+        interpretation: 'Unavailable',
+      },
+      us10y: {
+        label: 'US 10Y',
+        value: null,
+        previous: null,
+        change: null,
+        unit: '%',
+        bias: 'neutral',
+        interpretation: 'Unavailable',
+      },
+      macroScore: 0,
+      macroBias: 'NEUTRAL',
+      error: error instanceof Error ? error.message : 'Unknown macro error',
+      lastUpdate: Date.now(),
+    })
   }
 }
