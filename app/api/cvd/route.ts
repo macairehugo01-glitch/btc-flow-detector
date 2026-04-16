@@ -31,12 +31,11 @@ type SignalPayload = {
   action: 'BUY' | 'SELL' | 'STABLE'
   confidence: number
   signalType:
-    | 'majority_trap_long'
-    | 'majority_trap_short'
-    | 'bullish_reset'
-    | 'bearish_reset'
     | 'continuation_long'
     | 'continuation_short'
+    | 'breakout'
+    | 'bullish_retest'
+    | 'bearish_retest'
     | 'neutral'
   marketRegime: 'trend' | 'range' | 'breakout' | 'reversal'
   volatilityBucket: 'low' | 'medium' | 'high'
@@ -140,6 +139,29 @@ function getMarketRegime(
   return 'range'
 }
 
+function isValidSignalType(signalType: SignalPayload['signalType']) {
+  return [
+    'continuation_long',
+    'continuation_short',
+    'breakout',
+    'bullish_retest',
+    'bearish_retest',
+  ].includes(signalType)
+}
+
+function isValidVwapDistance(
+  signalType: SignalPayload['signalType'],
+  distancePct: number
+) {
+  const d = Math.abs(distancePct)
+
+  if (signalType === 'bullish_retest' || signalType === 'bearish_retest') {
+    return d >= 0.02 && d <= 0.08
+  }
+
+  return d >= 0.05 && d <= 0.18
+}
+
 function computeSignal(args: {
   klines: Array<{ open: number; high: number; low: number; close: number }>
   vwap: Array<{ vwap: number }>
@@ -156,11 +178,9 @@ function computeSignal(args: {
 
   const lastCvd = args.cvd.at(-1)
   const prevCvd = args.cvd.at(-2)
-  const prev2Cvd = args.cvd.at(-3)
 
   const lastOi = args.oi.at(-1)
   const prevOi = args.oi.at(-2)
-  const prev2Oi = args.oi.at(-3)
 
   const marketRegime = getMarketRegime(args.klines)
   const volatilityBucket = getVolatilityBucket(args.klines)
@@ -173,10 +193,8 @@ function computeSignal(args: {
     !prevV ||
     !lastCvd ||
     !prevCvd ||
-    !prev2Cvd ||
     !lastOi ||
-    !prevOi ||
-    !prev2Oi
+    !prevOi
   ) {
     return {
       action: 'STABLE',
@@ -184,7 +202,7 @@ function computeSignal(args: {
       signalType: 'neutral',
       marketRegime,
       volatilityBucket,
-      reasons: ['Pas assez de données pour lire un majority trap.'],
+      reasons: ['Pas assez de données pour lire un signal.'],
       metrics: {
         priceVsVwapPct: 0,
         cvdDelta: 0,
@@ -200,7 +218,6 @@ function computeSignal(args: {
 
   const priceVsVwapPct = ((lastK.close - lastV.vwap) / lastV.vwap) * 100
   const distanceFromVwapPct = Math.abs(priceVsVwapPct)
-  const closeEnoughToVwap = distanceFromVwapPct <= 1
 
   const cvdDelta = lastCvd.cvd - prevCvd.cvd
   const oiChangeAbs = lastOi.openInterest - prevOi.openInterest
@@ -212,57 +229,79 @@ function computeSignal(args: {
   const aboveVwap = lastK.close > lastV.vwap
   const belowVwap = lastK.close < lastV.vwap
 
-  const crossedAboveVwap =
-    prevK.close <= prevV.vwap && lastK.close > lastV.vwap
-  const crossedBelowVwap =
-    prevK.close >= prevV.vwap && lastK.close < lastV.vwap
-
   const reclaimAboveVwap = prevK.low < prevV.vwap && lastK.close > lastV.vwap
   const rejectBelowVwap = prevK.high > prevV.vwap && lastK.close < lastV.vwap
 
   const cvdBullNow = lastCvd.delta > 0 && cvdDelta > 0
   const cvdBearNow = lastCvd.delta < 0 && cvdDelta < 0
 
-  const cvdBullDivergence =
-    lastK.close <= prevK.close && lastCvd.cvd > prevCvd.cvd
-
-  const cvdBearDivergence =
-    lastK.close >= prevK.close && lastCvd.cvd < prevCvd.cvd
-
   const oiRising = oiDeltaPct > 0.005
-  const oiFalling = oiDeltaPct < -0.005
-
-  const oiRisingTwoBars =
-    lastOi.openInterest > prevOi.openInterest &&
-    prevOi.openInterest >= prev2Oi.openInterest
-
-  const priceMadeDownMove =
-    lastK.close < prevK.close || prevK.close < prev2K.close
-
-  const priceMadeUpMove =
-    lastK.close > prevK.close || prevK.close > prev2K.close
-
-  const bearishExpansion =
-    priceMadeDownMove && oiRisingTwoBars && cvdBearNow
-
-  const bullishExpansion =
-    priceMadeUpMove && oiRisingTwoBars && cvdBullNow
-
-  const fundingTooHotLong = fundingRate > 0.001
-  const fundingTooHotShort = fundingRate < -0.001
 
   let buyScore = 0
   let sellScore = 0
   const reasons: string[] = []
+  let signalType: SignalPayload['signalType'] = 'neutral'
 
-  if (!closeEnoughToVwap) {
+  if (aboveVwap) {
+    buyScore += 1
+    reasons.push('Prix au-dessus de la VWAP.')
+  }
+
+  if (belowVwap) {
+    sellScore += 1
+    reasons.push('Prix sous la VWAP.')
+  }
+
+  if (aboveVwap && cvdBullNow && oiRising) {
+    buyScore += 3
+    signalType = 'continuation_long'
+    reasons.push('Continuation long : VWAP + CVD + OI alignés.')
+  }
+
+  if (belowVwap && cvdBearNow && oiRising) {
+    sellScore += 3
+    signalType = 'continuation_short'
+    reasons.push('Continuation short : VWAP + CVD + OI alignés.')
+  }
+
+  if (
+    marketRegime === 'breakout' &&
+    ((aboveVwap && lastK.close > prevK.high) ||
+      (belowVwap && lastK.close < prevK.low))
+  ) {
+    if (aboveVwap) {
+      buyScore += 3
+      signalType = 'breakout'
+      reasons.push('Breakout haussier confirmé.')
+    }
+
+    if (belowVwap) {
+      sellScore += 3
+      signalType = 'breakout'
+      reasons.push('Breakout baissier confirmé.')
+    }
+  }
+
+  if (aboveVwap && reclaimAboveVwap && cvdBullNow) {
+    buyScore += 3
+    signalType = 'bullish_retest'
+    reasons.push('Bullish retest de la VWAP.')
+  }
+
+  if (belowVwap && rejectBelowVwap && cvdBearNow) {
+    sellScore += 3
+    signalType = 'bearish_retest'
+    reasons.push('Bearish retest de la VWAP.')
+  }
+
+  if (!isValidSignalType(signalType)) {
     return {
       action: 'STABLE',
       confidence: 1,
       signalType: 'neutral',
       marketRegime,
       volatilityBucket,
-      reasons: ['Prix trop éloigné de la VWAP (> 1%).'],
+      reasons: ['Signal type non valide.'],
       metrics: {
         priceVsVwapPct,
         cvdDelta,
@@ -274,102 +313,70 @@ function computeSignal(args: {
     }
   }
 
-  if (aboveVwap) {
-    buyScore += 1
-    reasons.push('Prix au-dessus de la VWAP.')
-  } else {
-    buyScore = -999
-  }
-
-  if (belowVwap) {
-    sellScore += 1
-    reasons.push('Prix sous la VWAP.')
-  } else {
-    sellScore = -999
-  }
-
-  if (crossedAboveVwap || reclaimAboveVwap) {
-    buyScore += 2
-    reasons.push('Reprise / reclaim de la VWAP.')
-  }
-
-  if (crossedBelowVwap || rejectBelowVwap) {
-    sellScore += 2
-    reasons.push('Rejet / cassure sous la VWAP.')
-  }
-
-  if (cvdBullNow) {
-    buyScore += 1
-    reasons.push('CVD haussier sur la dernière jambe.')
-  }
-
-  if (cvdBearNow) {
-    sellScore += 1
-    reasons.push('CVD baissier sur la dernière jambe.')
-  }
-
-  if (cvdBullDivergence) {
-    buyScore += 2
-    reasons.push('Divergence haussière du CVD.')
-  }
-
-  if (cvdBearDivergence) {
-    sellScore += 2
-    reasons.push('Divergence baissière du CVD.')
-  }
-
-  if (oiRising) {
-    if (aboveVwap) {
-      buyScore += 1
-      reasons.push('OI en hausse dans un contexte haussier.')
-    }
-
-    if (belowVwap) {
-      sellScore += 1
-      reasons.push('OI en hausse dans un contexte baissier.')
+  if (!isValidVwapDistance(signalType, priceVsVwapPct)) {
+    return {
+      action: 'STABLE',
+      confidence: 1,
+      signalType,
+      marketRegime,
+      volatilityBucket,
+      reasons: ['Distance VWAP non valide pour ce signal type.'],
+      metrics: {
+        priceVsVwapPct,
+        cvdDelta,
+        oiDeltaPct,
+        fundingRate,
+        oiChangeAbs,
+        distanceFromVwapPct,
+      },
     }
   }
 
-  if (oiFalling && aboveVwap) {
-    buyScore += 1
-    reasons.push('OI en baisse avec reprise haussière : short covering possible.')
+  if (
+    (signalType === 'continuation_long' || signalType === 'bullish_retest') &&
+    !aboveVwap
+  ) {
+    return {
+      action: 'STABLE',
+      confidence: 1,
+      signalType,
+      marketRegime,
+      volatilityBucket,
+      reasons: ['BUY interdit sous VWAP.'],
+      metrics: {
+        priceVsVwapPct,
+        cvdDelta,
+        oiDeltaPct,
+        fundingRate,
+        oiChangeAbs,
+        distanceFromVwapPct,
+      },
+    }
   }
 
-  if (oiFalling && belowVwap) {
-    sellScore += 1
-    reasons.push('OI en baisse avec faiblesse : long liquidation possible.')
+  if (
+    (signalType === 'continuation_short' || signalType === 'bearish_retest') &&
+    !belowVwap
+  ) {
+    return {
+      action: 'STABLE',
+      confidence: 1,
+      signalType,
+      marketRegime,
+      volatilityBucket,
+      reasons: ['SELL interdit au-dessus VWAP.'],
+      metrics: {
+        priceVsVwapPct,
+        cvdDelta,
+        oiDeltaPct,
+        fundingRate,
+        oiChangeAbs,
+        distanceFromVwapPct,
+      },
+    }
   }
 
-  let signalType: SignalPayload['signalType'] = 'neutral'
-
-  if (bearishExpansion && crossedAboveVwap) {
-    buyScore += 2
-    signalType = 'majority_trap_long'
-    reasons.push('Trap short probable après expansion vendeuse puis reprise VWAP.')
-  }
-
-  if (bullishExpansion && crossedBelowVwap) {
-    sellScore += 2
-    signalType = 'majority_trap_short'
-    reasons.push('Trap long probable après expansion haussière puis perte VWAP.')
-  }
-
-  if (crossedAboveVwap && signalType === 'neutral') signalType = 'bullish_reset'
-  if (crossedBelowVwap && signalType === 'neutral') signalType = 'bearish_reset'
-  if (cvdBullNow && aboveVwap && signalType === 'neutral') signalType = 'continuation_long'
-  if (cvdBearNow && belowVwap && signalType === 'neutral') signalType = 'continuation_short'
-
-  if (fundingTooHotLong) {
-    buyScore -= 1
-    reasons.push('Funding trop chaud côté long.')
-  }
-
-  if (fundingTooHotShort) {
-    sellScore -= 1
-    reasons.push('Funding trop chaud côté short.')
-  }
-
-  if (buyScore >= 5 && buyScore > sellScore + 1) {
+  if (buyScore >= 5 && buyScore > sellScore) {
     return {
       action: 'BUY',
       confidence: 5,
@@ -388,7 +395,7 @@ function computeSignal(args: {
     }
   }
 
-  if (sellScore >= 5 && sellScore > buyScore + 1) {
+  if (sellScore >= 5 && sellScore > buyScore) {
     return {
       action: 'SELL',
       confidence: 5,
@@ -445,51 +452,13 @@ function computeSignal(args: {
     }
   }
 
-  if (buyScore >= 3 && buyScore > sellScore) {
-    return {
-      action: 'BUY',
-      confidence: 3,
-      signalType,
-      marketRegime,
-      volatilityBucket,
-      reasons,
-      metrics: {
-        priceVsVwapPct,
-        cvdDelta,
-        oiDeltaPct,
-        fundingRate,
-        oiChangeAbs,
-        distanceFromVwapPct,
-      },
-    }
-  }
-
-  if (sellScore >= 3 && sellScore > buyScore) {
-    return {
-      action: 'SELL',
-      confidence: 3,
-      signalType,
-      marketRegime,
-      volatilityBucket,
-      reasons,
-      metrics: {
-        priceVsVwapPct,
-        cvdDelta,
-        oiDeltaPct,
-        fundingRate,
-        oiChangeAbs,
-        distanceFromVwapPct,
-      },
-    }
-  }
-
   return {
     action: 'STABLE',
     confidence: 2,
     signalType: 'neutral',
     marketRegime,
     volatilityBucket,
-    reasons: reasons.length ? reasons : ['Pas de majority trap net.'],
+    reasons: reasons.length ? reasons : ['Pas de signal propre.'],
     metrics: {
       priceVsVwapPct,
       cvdDelta,
@@ -569,6 +538,9 @@ export async function GET(req: NextRequest) {
           signal.confidence >= 5 &&
           signal.confidence > currentPosition.confidence &&
           structureOk &&
+          signal.signalType !== 'neutral' &&
+          isValidSignalType(signal.signalType) &&
+          isValidVwapDistance(signal.signalType, signal.metrics.priceVsVwapPct) &&
           lastReverseBarKey !== referenceBarKey
 
         if (canReverse) {
