@@ -72,10 +72,11 @@ function durationBucket(min?: number) {
 }
 
 function vwapDistanceBucket(v: number) {
-  if (v <= 0.25) return '0–0.25%'
-  if (v <= 0.5) return '0.25–0.5%'
-  if (v <= 1) return '0.5–1%'
-  return '>1%'
+  if (v <= 0.02) return '0–0.02%'
+  if (v <= 0.05) return '0.02–0.05%'
+  if (v <= 0.08) return '0.05–0.08%'
+  if (v <= 0.18) return '0.08–0.18%'
+  return '>0.18%'
 }
 
 function buildRow(label: string, trades: StoredSetup[]): AnalyticsRow {
