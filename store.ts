@@ -3,12 +3,22 @@ import { loadJournalFile, saveJournalFile } from './journalPersistence'
 type SetupStatus = 'open' | 'win' | 'loss'
 export type SessionName = 'Asia' | 'London' | 'New York'
 export type Timeframe = '1m' | '5m' | '15m' | '1h'
+
+/**
+ * Version COMPATIBLE TRANSITION :
+ * on garde les anciens + les nouveaux types
+ * pour que le build passe tant que route.ts n'a pas encore été remplacé
+ */
 export type SignalType =
   | 'continuation_long'
   | 'continuation_short'
   | 'breakout'
   | 'bullish_retest'
   | 'bearish_retest'
+  | 'majority_trap_long'
+  | 'majority_trap_short'
+  | 'bullish_reset'
+  | 'bearish_reset'
   | 'neutral'
 
 export type MarketRegime = 'trend' | 'range' | 'breakout' | 'reversal'
