@@ -43,12 +43,15 @@ export type StoredSetup = {
   confidence: number
 
   signalType:
+    | 'continuation_long'
+    | 'continuation_short'
+    | 'breakout'
+    | 'bullish_retest'
+    | 'bearish_retest'
     | 'majority_trap_long'
     | 'majority_trap_short'
     | 'bullish_reset'
     | 'bearish_reset'
-    | 'continuation_long'
-    | 'continuation_short'
     | 'neutral'
 
   marketRegime: 'trend' | 'range' | 'breakout' | 'reversal'
@@ -96,12 +99,15 @@ export type TradeSignal = {
   action: 'BUY' | 'SELL' | 'STABLE'
   confidence: number
   signalType:
+    | 'continuation_long'
+    | 'continuation_short'
+    | 'breakout'
+    | 'bullish_retest'
+    | 'bearish_retest'
     | 'majority_trap_long'
     | 'majority_trap_short'
     | 'bullish_reset'
     | 'bearish_reset'
-    | 'continuation_long'
-    | 'continuation_short'
     | 'neutral'
   marketRegime: 'trend' | 'range' | 'breakout' | 'reversal'
   volatilityBucket: 'low' | 'medium' | 'high'
