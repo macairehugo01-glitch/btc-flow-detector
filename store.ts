@@ -190,34 +190,7 @@ export function openPosition(input: {
   marketRegime: MarketRegime
   vwapDistancePct: number
   volatilityBucket: VolatilityBucket
-})
-sendTelegramMessage(
-`📈 *NEW TRADE*
-
-${input.action} ${input.timeframe}
-
-Price: ${setup.entryPrice}
-
-SL: ${setup.stopLoss}
-TP: ${setup.takeProfit}
-RR: ${setup.rr}
-
-Confidence: ${setup.confidence}/5
-Type: ${setup.signalType}
-
-VWAP dist: ${setup.vwapDistancePct.toFixed(3)}%
-Session: ${setup.session}`
-
-  sendTelegramMessage(
-`📉 *TRADE CLOSED*
-
-Result: ${setup.status.toUpperCase()}
-R: ${setup.rMultiple?.toFixed(2)}
-
-Duration: ${setup.durationMinutes?.toFixed(1)} min`
-)
-)
-{
+}) {
   const { stopLoss, takeProfit, rr } = buildRiskLevels(
     input.entryPrice,
     input.action
@@ -250,6 +223,24 @@ Duration: ${setup.durationMinutes?.toFixed(1)} min`
     status: 'open',
     referenceBarKey: input.referenceBarKey,
   }
+
+  sendTelegramMessage(
+`📈 *NEW TRADE*
+
+${setup.action} ${setup.timeframe}
+
+Price: ${setup.entryPrice}
+
+SL: ${setup.stopLoss}
+TP: ${setup.takeProfit}
+RR: ${setup.rr}
+
+Confidence: ${setup.confidence}/5
+Type: ${setup.signalType}
+
+VWAP dist: ${setup.vwapDistancePct.toFixed(3)}%
+Session: ${setup.session}`
+  )
 
   state.setups.unshift(setup)
 
@@ -293,6 +284,15 @@ export function closeCurrentPositionAtMarket(
     (timestamp - setup.timestamp) / 1000 / 60
   )
   setup.status = realizedR >= 0 ? 'win' : 'loss'
+
+  sendTelegramMessage(
+`📉 *TRADE CLOSED*
+
+Result: ${setup.status.toUpperCase()}
+R: ${setup.rMultiple?.toFixed(2)}
+
+Duration: ${setup.durationMinutes?.toFixed(1)} min`
+  )
 
   state.currentPosition = null
   persist()
