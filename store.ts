@@ -207,6 +207,15 @@ Type: ${setup.signalType}
 
 VWAP dist: ${setup.vwapDistancePct.toFixed(3)}%
 Session: ${setup.session}`
+
+  sendTelegramMessage(
+`📉 *TRADE CLOSED*
+
+Result: ${setup.status.toUpperCase()}
+R: ${setup.rMultiple?.toFixed(2)}
+
+Duration: ${setup.durationMinutes?.toFixed(1)} min`
+)
 )
 {
   const { stopLoss, takeProfit, rr } = buildRiskLevels(
