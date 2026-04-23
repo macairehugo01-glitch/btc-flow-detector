@@ -153,6 +153,44 @@ function computeRealizedR(setup: StoredSetup, exitPrice: number) {
   return (setup.entryPrice - exitPrice) / risk
 }
 
+async function notifyOpen(setup: StoredSetup) {
+  try {
+    await sendTelegramMessage(
+`📈 *NEW TRADE*
+
+${setup.action} ${setup.timeframe}
+
+Price: ${setup.entryPrice}
+SL: ${setup.stopLoss}
+TP: ${setup.takeProfit}
+RR: ${setup.rr}
+
+Confidence: ${setup.confidence}/5
+Type: ${setup.signalType}
+
+VWAP dist: ${setup.vwapDistancePct.toFixed(3)}%
+Session: ${setup.session}`
+    )
+  } catch (err) {
+    console.error('[Telegram] notifyOpen error:', err)
+  }
+}
+
+async function notifyClose(setup: StoredSetup) {
+  try {
+    await sendTelegramMessage(
+`📉 *TRADE CLOSED*
+
+Result: ${setup.status.toUpperCase()}
+R: ${setup.rMultiple?.toFixed(2)}
+
+Duration: ${setup.durationMinutes?.toFixed(1)} min`
+    )
+  } catch (err) {
+    console.error('[Telegram] notifyClose error:', err)
+  }
+}
+
 export function getCurrentPosition() {
   return state.currentPosition
 }
@@ -178,7 +216,7 @@ export function hasRecentDuplicate(
   )
 }
 
-export function openPosition(input: {
+export async function openPosition(input: {
   timestamp: number
   timeframe: Timeframe
   action: 'BUY' | 'SELL'
@@ -224,24 +262,6 @@ export function openPosition(input: {
     referenceBarKey: input.referenceBarKey,
   }
 
-  sendTelegramMessage(
-`📈 *NEW TRADE*
-
-${setup.action} ${setup.timeframe}
-
-Price: ${setup.entryPrice}
-
-SL: ${setup.stopLoss}
-TP: ${setup.takeProfit}
-RR: ${setup.rr}
-
-Confidence: ${setup.confidence}/5
-Type: ${setup.signalType}
-
-VWAP dist: ${setup.vwapDistancePct.toFixed(3)}%
-Session: ${setup.session}`
-  )
-
   state.setups.unshift(setup)
 
   state.currentPosition = {
@@ -257,10 +277,11 @@ Session: ${setup.session}`
   }
 
   persist()
+  await notifyOpen(setup)
   return setup
 }
 
-export function closeCurrentPositionAtMarket(
+export async function closeCurrentPositionAtMarket(
   timestamp: number,
   exitPrice: number
 ) {
@@ -285,20 +306,12 @@ export function closeCurrentPositionAtMarket(
   )
   setup.status = realizedR >= 0 ? 'win' : 'loss'
 
-  sendTelegramMessage(
-`📉 *TRADE CLOSED*
-
-Result: ${setup.status.toUpperCase()}
-R: ${setup.rMultiple?.toFixed(2)}
-
-Duration: ${setup.durationMinutes?.toFixed(1)} min`
-  )
-
   state.currentPosition = null
   persist()
+  await notifyClose(setup)
 }
 
-export function reversePosition(input: {
+export async function reversePosition(input: {
   timestamp: number
   timeframe: Timeframe
   action: 'BUY' | 'SELL'
@@ -311,7 +324,7 @@ export function reversePosition(input: {
   vwapDistancePct: number
   volatilityBucket: VolatilityBucket
 }) {
-  closeCurrentPositionAtMarket(input.timestamp, input.entryPrice)
+  await closeCurrentPositionAtMarket(input.timestamp, input.entryPrice)
   state.lastReverseBarKey = input.referenceBarKey
   persist()
   return openPosition(input)
@@ -345,6 +358,7 @@ export function evaluateOpenSetups(
             (setup.closedAt - setup.timestamp) / 1000 / 60
           )
           if (state.currentPosition?.setupId === setup.id) state.currentPosition = null
+          notifyClose(setup)
           changed = true
           break
         }
@@ -363,6 +377,7 @@ export function evaluateOpenSetups(
             (setup.closedAt - setup.timestamp) / 1000 / 60
           )
           if (state.currentPosition?.setupId === setup.id) state.currentPosition = null
+          notifyClose(setup)
           changed = true
           break
         }
