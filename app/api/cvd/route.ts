@@ -515,7 +515,7 @@ export async function GET(req: NextRequest) {
           signal.confidence >= 4 &&
           !hasRecentDuplicate(signal.action, safeTimeframe, Date.now())
         ) {
-          openPosition({
+          await openPosition({
             timestamp: Date.now(),
             timeframe: safeTimeframe,
             action: signal.action,
@@ -544,7 +544,7 @@ export async function GET(req: NextRequest) {
           lastReverseBarKey !== referenceBarKey
 
         if (canReverse) {
-          reversePosition({
+          await reversePosition({
             timestamp: Date.now(),
             timeframe: safeTimeframe,
             action: signal.action,
