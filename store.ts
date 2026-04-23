@@ -1,5 +1,5 @@
 import { loadJournalFile, saveJournalFile } from './journalPersistence'
-import { sendTelegramMessage } from '../lib/telegram'
+import { sendTelegramMessage } from './lib/telegram'
 
 type SetupStatus = 'open' | 'win' | 'loss'
 export type SessionName = 'Asia' | 'London' | 'New York'
