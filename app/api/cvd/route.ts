@@ -515,6 +515,7 @@ export async function GET(req: NextRequest) {
           signal.confidence >= 4 &&
           !hasRecentDuplicate(signal.action, safeTimeframe, Date.now())
         ) {
+          console.log('[TRADE] openPosition appelé:', signal.action, ticker.price)
           await openPosition({
             timestamp: Date.now(),
             timeframe: safeTimeframe,
@@ -544,6 +545,7 @@ export async function GET(req: NextRequest) {
           lastReverseBarKey !== referenceBarKey
 
         if (canReverse) {
+          console.log('[TRADE] reversePosition appelé:', signal.action, ticker.price)
           await reversePosition({
             timestamp: Date.now(),
             timeframe: safeTimeframe,
