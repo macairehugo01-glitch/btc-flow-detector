@@ -190,7 +190,25 @@ export function openPosition(input: {
   marketRegime: MarketRegime
   vwapDistancePct: number
   volatilityBucket: VolatilityBucket
-}) {
+})
+sendTelegramMessage(
+`📈 *NEW TRADE*
+
+${input.action} ${input.timeframe}
+
+Price: ${setup.entryPrice}
+
+SL: ${setup.stopLoss}
+TP: ${setup.takeProfit}
+RR: ${setup.rr}
+
+Confidence: ${setup.confidence}/5
+Type: ${setup.signalType}
+
+VWAP dist: ${setup.vwapDistancePct.toFixed(3)}%
+Session: ${setup.session}`
+)
+{
   const { stopLoss, takeProfit, rr } = buildRiskLevels(
     input.entryPrice,
     input.action
