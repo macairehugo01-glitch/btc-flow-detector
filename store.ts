@@ -89,15 +89,22 @@ type PersistedState = {
   setups: StoredSetup[]
   currentPosition: LivePosition
   lastReverseBarKey: string | null
+  lastLossTimestamp: number | null
 }
 
 const initialState: PersistedState = {
   setups: [],
   currentPosition: null,
   lastReverseBarKey: null,
+  lastLossTimestamp: null,
 }
 
 const state = loadJournalFile<PersistedState>(initialState)
+
+// Migration : ajouter lastLossTimestamp si absent (anciens fichiers JSON)
+if (state.lastLossTimestamp === undefined) {
+  state.lastLossTimestamp = null
+}
 
 function persist() {
   saveJournalFile(state)
@@ -124,8 +131,8 @@ function hourBucketFromTimestamp(tsMs: number) {
 
 /**
  * Stop basé sur la VWAP avec marge de 0.15% pour absorber le bruit.
- * Long : stop = VWAP - 0.15% (sous VWAP → invalidation du reclaim)
- * Short : stop = VWAP + 0.15% (au-dessus VWAP → invalidation du rejet)
+ * Long : stop = VWAP - 0.15%
+ * Short : stop = VWAP + 0.15%
  * TP = entrée + (risk × 2R)
  */
 function buildRiskLevels(
@@ -133,13 +140,13 @@ function buildRiskLevels(
   action: 'BUY' | 'SELL',
   vwap: number
 ) {
-  const VWAP_BUFFER = 0.0015 // 0.15% de marge bruit de fond
+  const VWAP_BUFFER = 0.0015
   const RR = 2
 
   const stopLoss =
     action === 'BUY'
-      ? vwap * (1 - VWAP_BUFFER)   // sous VWAP
-      : vwap * (1 + VWAP_BUFFER)   // au-dessus VWAP
+      ? vwap * (1 - VWAP_BUFFER)
+      : vwap * (1 + VWAP_BUFFER)
 
   const riskMove = Math.abs(entryPrice - stopLoss)
 
@@ -206,6 +213,19 @@ export function getLastReverseBarKey() {
 
 export function getTradeJournal() {
   return state.setups
+}
+
+/**
+ * Cooldown après une perte : 3 bougies de 5m = 15 minutes.
+ * Laisse le marché se stabiliser avant de reprendre.
+ */
+export function isInCooldown(timeframe: Timeframe): boolean {
+  if (!state.lastLossTimestamp) return false
+  const cooldownMs = timeframe === '1m' ? 3 * 60 * 1000
+    : timeframe === '5m' ? 15 * 60 * 1000
+    : timeframe === '15m' ? 45 * 60 * 1000
+    : 3 * 60 * 60 * 1000 // 1h → 3 bougies
+  return Date.now() - state.lastLossTimestamp < cooldownMs
 }
 
 export function hasRecentDuplicate(
@@ -310,6 +330,11 @@ export async function closeCurrentPositionAtMarket(
   setup.durationMinutes = Math.max(0, (timestamp - setup.timestamp) / 1000 / 60)
   setup.status = realizedR >= 0 ? 'win' : 'loss'
 
+  // Enregistrer le timestamp de la perte pour le cooldown
+  if (setup.status === 'loss') {
+    state.lastLossTimestamp = timestamp
+  }
+
   state.currentPosition = null
   persist()
   await notifyClose(setup)
@@ -361,6 +386,7 @@ export function evaluateOpenSetups(
           setup.closedAt = candle.time * 1000
           setup.durationMinutes = Math.max(0, (setup.closedAt - setup.timestamp) / 1000 / 60)
           if (state.currentPosition?.setupId === setup.id) state.currentPosition = null
+          if (setup.status === 'loss') state.lastLossTimestamp = setup.closedAt!
           notifyClose(setup)
           changed = true
           break
@@ -377,6 +403,7 @@ export function evaluateOpenSetups(
           setup.closedAt = candle.time * 1000
           setup.durationMinutes = Math.max(0, (setup.closedAt - setup.timestamp) / 1000 / 60)
           if (state.currentPosition?.setupId === setup.id) state.currentPosition = null
+          if (setup.status === 'loss') state.lastLossTimestamp = setup.closedAt!
           notifyClose(setup)
           changed = true
           break
