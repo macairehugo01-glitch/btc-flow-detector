@@ -327,7 +327,8 @@ export async function reversePosition(input: {
   await closeCurrentPositionAtMarket(input.timestamp, input.entryPrice)
   state.lastReverseBarKey = input.referenceBarKey
   persist()
-  return openPosition(input)
+  const result = await openPosition(input)
+  return result
 }
 
 export function evaluateOpenSetups(
