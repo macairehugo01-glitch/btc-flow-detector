@@ -101,7 +101,6 @@ const initialState: PersistedState = {
 
 const state = loadJournalFile<PersistedState>(initialState)
 
-// Migration : ajouter lastLossTimestamp si absent (anciens fichiers JSON)
 if (state.lastLossTimestamp === undefined) {
   state.lastLossTimestamp = null
 }
@@ -129,12 +128,6 @@ function hourBucketFromTimestamp(tsMs: number) {
   return `${String(h).padStart(2, '0')}:00-${String(next).padStart(2, '0')}:00`
 }
 
-/**
- * Stop basé sur la VWAP avec marge de 0.15% pour absorber le bruit.
- * Long : stop = VWAP - 0.15%
- * Short : stop = VWAP + 0.15%
- * TP = entrée + (risk × 2R)
- */
 function buildRiskLevels(
   entryPrice: number,
   action: 'BUY' | 'SELL',
@@ -165,6 +158,10 @@ function computeRealizedR(setup: StoredSetup, exitPrice: number) {
   return (setup.entryPrice - exitPrice) / risk
 }
 
+function escapeMarkdown(text: string): string {
+  return text.replace(/_/g, '\\_').replace(/\*/g, '\\*').replace(/\[/g, '\\[')
+}
+
 async function notifyOpen(setup: StoredSetup) {
   try {
     await sendTelegramMessage(
@@ -178,7 +175,7 @@ TP: ${setup.takeProfit.toFixed(2)}
 RR: ${setup.rr}
 
 Confidence: ${setup.confidence}/5
-Type: ${setup.signalType}
+Type: ${escapeMarkdown(setup.signalType)}
 
 VWAP dist: ${setup.vwapDistancePct.toFixed(3)}%
 Session: ${setup.session}`
@@ -215,16 +212,12 @@ export function getTradeJournal() {
   return state.setups
 }
 
-/**
- * Cooldown après une perte : 3 bougies de 5m = 15 minutes.
- * Laisse le marché se stabiliser avant de reprendre.
- */
 export function isInCooldown(timeframe: Timeframe): boolean {
   if (!state.lastLossTimestamp) return false
   const cooldownMs = timeframe === '1m' ? 3 * 60 * 1000
     : timeframe === '5m' ? 15 * 60 * 1000
     : timeframe === '15m' ? 45 * 60 * 1000
-    : 3 * 60 * 60 * 1000 // 1h → 3 bougies
+    : 3 * 60 * 60 * 1000
   return Date.now() - state.lastLossTimestamp < cooldownMs
 }
 
@@ -249,7 +242,6 @@ export async function openPosition(input: {
   entryPrice: number
   vwap: number
   referenceBarKey: string
-
   signalType: SignalType
   marketRegime: MarketRegime
   vwapDistancePct: number
@@ -263,28 +255,23 @@ export async function openPosition(input: {
 
   const setup: StoredSetup = {
     id: `${input.action}-${input.timeframe}-${input.timestamp}`,
-
     timestamp: input.timestamp,
     session: sessionFromTimestamp(input.timestamp),
     weekday: weekdayFromTimestamp(input.timestamp),
     hourBucket: hourBucketFromTimestamp(input.timestamp),
-
     timeframe: input.timeframe,
     action: input.action,
     confidence: input.confidence,
-
     signalType: input.signalType,
     marketRegime: input.marketRegime,
     vwapSide: input.action === 'BUY' ? 'above' : 'below',
     vwapDistancePct: input.vwapDistancePct,
     volatilityBucket: input.volatilityBucket,
-
     entryPrice: input.entryPrice,
     stopLoss,
     takeProfit,
     rr,
     riskPercent: 3,
-
     status: 'open',
     referenceBarKey: input.referenceBarKey,
   }
@@ -330,7 +317,6 @@ export async function closeCurrentPositionAtMarket(
   setup.durationMinutes = Math.max(0, (timestamp - setup.timestamp) / 1000 / 60)
   setup.status = realizedR >= 0 ? 'win' : 'loss'
 
-  // Enregistrer le timestamp de la perte pour le cooldown
   if (setup.status === 'loss') {
     state.lastLossTimestamp = timestamp
   }
@@ -348,7 +334,6 @@ export async function reversePosition(input: {
   entryPrice: number
   vwap: number
   referenceBarKey: string
-
   signalType: SignalType
   marketRegime: MarketRegime
   vwapDistancePct: number
