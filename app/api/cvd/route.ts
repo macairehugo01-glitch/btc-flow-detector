@@ -55,39 +55,22 @@ const MAX_OI_POINTS = 500
 
 function pushOiSnapshot(snapshot: OIBar) {
   const last = oiSessionBuffer.at(-1)
-
-  if (!last) {
-    oiSessionBuffer.push(snapshot)
-    return
-  }
-
-  if (
-    snapshot.time !== last.time ||
-    snapshot.openInterest !== last.openInterest
-  ) {
+  if (!last) { oiSessionBuffer.push(snapshot); return }
+  if (snapshot.time !== last.time || snapshot.openInterest !== last.openInterest) {
     oiSessionBuffer.push(snapshot)
   }
-
-  while (oiSessionBuffer.length > MAX_OI_POINTS) {
-    oiSessionBuffer.shift()
-  }
+  while (oiSessionBuffer.length > MAX_OI_POINTS) oiSessionBuffer.shift()
 }
 
 function buildOiSeriesForKlines(klines: Array<{ time: number }>): OIBar[] {
   if (!klines.length || !oiSessionBuffer.length) return []
-
   return klines.map((k) => {
     let matched = oiSessionBuffer[0]
-
     for (const point of oiSessionBuffer) {
       if (point.time <= k.time) matched = point
       else break
     }
-
-    return {
-      time: k.time,
-      openInterest: matched.openInterest,
-    }
+    return { time: k.time, openInterest: matched.openInterest }
   })
 }
 
@@ -96,11 +79,9 @@ function getVolatilityBucket(
 ): 'low' | 'medium' | 'high' {
   const sample = klines.slice(-10)
   if (!sample.length) return 'medium'
-
   const avgRangePct =
     sample.reduce((sum, k) => sum + ((k.high - k.low) / k.close) * 100, 0) /
     sample.length
-
   if (avgRangePct < 0.35) return 'low'
   if (avgRangePct < 1) return 'medium'
   return 'high'
@@ -111,363 +92,201 @@ function getMarketRegime(
 ): 'trend' | 'range' | 'breakout' | 'reversal' {
   const sample = klines.slice(-12)
   if (sample.length < 4) return 'range'
-
   const highs = sample.map((k) => k.high)
   const lows = sample.map((k) => k.low)
   const closes = sample.map((k) => k.close)
-
   const maxHigh = Math.max(...highs)
   const minLow = Math.min(...lows)
-  const rangePct = ((maxHigh - minLow) / closes.at(-1)!) * 100
-
   const last = closes.at(-1)!
   const prev = closes.at(-2)!
   const prev2 = closes.at(-3)!
-
+  const rangePct = ((maxHigh - minLow) / last) * 100
   if (last > prev && prev > prev2 && rangePct > 1.2) return 'trend'
   if (last < prev && prev < prev2 && rangePct > 1.2) return 'trend'
-
   if (last > maxHigh * 0.998 || last < minLow * 1.002) return 'breakout'
-
-  if (
-    (last > prev && prev < prev2) ||
-    (last < prev && prev > prev2)
-  ) {
-    return 'reversal'
-  }
-
+  if ((last > prev && prev < prev2) || (last < prev && prev > prev2)) return 'reversal'
   return 'range'
 }
 
-function isValidSignalType(signalType: SignalPayload['signalType']) {
-  return [
-    'continuation_long',
-    'continuation_short',
-    'breakout',
-    'bullish_retest',
-    'bearish_retest',
-  ].includes(signalType)
+// ─── LFR HELPERS ────────────────────────────────────────────────────────────
+
+function detectHighSweep(
+  klines: Array<{ high: number; low: number; close: number; open: number }>
+): boolean {
+  const lookback = klines.slice(-51, -1)
+  if (lookback.length < 10) return false
+  const structureHigh = Math.max(...lookback.map((k) => k.high))
+  const last = klines.at(-1)!
+  return last.high > structureHigh && last.close < structureHigh
 }
 
-function isValidVwapDistance(
-  signalType: SignalPayload['signalType'],
-  distancePct: number
-) {
-  const d = Math.abs(distancePct)
-
-  if (signalType === 'bullish_retest' || signalType === 'bearish_retest') {
-    return d >= 0.02 && d <= 0.08
-  }
-
-  return d >= 0.05 && d <= 0.18
+function detectLowSweep(
+  klines: Array<{ high: number; low: number; close: number; open: number }>
+): boolean {
+  const lookback = klines.slice(-51, -1)
+  if (lookback.length < 10) return false
+  const structureLow = Math.min(...lookback.map((k) => k.low))
+  const last = klines.at(-1)!
+  return last.low < structureLow && last.close > structureLow
 }
+
+function oiStagningOrFalling(oi: OIBar[], lookbackBars = 5): boolean {
+  if (oi.length < lookbackBars + 1) return false
+  const recent = oi.slice(-(lookbackBars + 1))
+  const oiStart = recent[0].openInterest
+  const oiEnd = recent[recent.length - 1].openInterest
+  const changePct = ((oiEnd - oiStart) / oiStart) * 100
+  return changePct <= 0.01
+}
+
+function oiExpanding(oi: OIBar[], lookbackBars = 5): boolean {
+  if (oi.length < lookbackBars + 1) return false
+  const recent = oi.slice(-(lookbackBars + 1))
+  const oiStart = recent[0].openInterest
+  const oiEnd = recent[recent.length - 1].openInterest
+  const changePct = ((oiEnd - oiStart) / oiStart) * 100
+  return changePct > 0.02
+}
+
+function detectVwapReclaim(
+  klines: Array<{ close: number }>,
+  vwap: Array<{ vwap: number }>
+): boolean {
+  const lastK = klines.at(-1)
+  const prevK = klines.at(-2)
+  const lastV = vwap.at(-1)
+  const prevV = vwap.at(-2)
+  if (!lastK || !prevK || !lastV || !prevV) return false
+  return prevK.close < prevV.vwap && lastK.close > lastV.vwap
+}
+
+function detectVwapReject(
+  klines: Array<{ close: number }>,
+  vwap: Array<{ vwap: number }>
+): boolean {
+  const lastK = klines.at(-1)
+  const prevK = klines.at(-2)
+  const lastV = vwap.at(-1)
+  const prevV = vwap.at(-2)
+  if (!lastK || !prevK || !lastV || !prevV) return false
+  return prevK.close > prevV.vwap && lastK.close < lastV.vwap
+}
+
+function detectHL(klines: Array<{ low: number }>): boolean {
+  const last = klines.at(-1)
+  const prev = klines.at(-3)
+  if (!last || !prev) return false
+  return last.low > prev.low
+}
+
+function detectLH(klines: Array<{ high: number }>): boolean {
+  const last = klines.at(-1)
+  const prev = klines.at(-3)
+  if (!last || !prev) return false
+  return last.high < prev.high
+}
+
+// ─── SCORE LFR 0–5 ──────────────────────────────────────────────────────────
 
 function computeSignal(args: {
   klines: Array<{ open: number; high: number; low: number; close: number }>
   vwap: Array<{ vwap: number }>
   cvd: Array<{ delta: number; cvd: number }>
-  oi: Array<{ openInterest: number }>
+  oi: OIBar[]
   funding: { rate: number } | null
 }): SignalPayload {
   const lastK = args.klines.at(-1)
   const prevK = args.klines.at(-2)
-  const prev2K = args.klines.at(-3)
-
   const lastV = args.vwap.at(-1)
-  const prevV = args.vwap.at(-2)
-
   const lastCvd = args.cvd.at(-1)
   const prevCvd = args.cvd.at(-2)
-
   const lastOi = args.oi.at(-1)
-  const prevOi = args.oi.at(-2)
 
   const marketRegime = getMarketRegime(args.klines)
   const volatilityBucket = getVolatilityBucket(args.klines)
+  const fundingRate = args.funding?.rate ?? 0
 
-  if (
-    !lastK ||
-    !prevK ||
-    !prev2K ||
-    !lastV ||
-    !prevV ||
-    !lastCvd ||
-    !prevCvd ||
-    !lastOi ||
-    !prevOi
-  ) {
+  if (!lastK || !prevK || !lastV || !lastCvd || !prevCvd || !lastOi) {
     return {
-      action: 'STABLE',
-      confidence: 1,
-      signalType: 'neutral',
-      marketRegime,
-      volatilityBucket,
-      reasons: ['Pas assez de données pour lire un signal.'],
-      metrics: {
-        priceVsVwapPct: 0,
-        cvdDelta: 0,
-        oiDeltaPct: 0,
-        fundingRate: args.funding?.rate ?? 0,
-        oiChangeAbs: 0,
-        distanceFromVwapPct: 0,
-      },
+      action: 'STABLE', confidence: 1, signalType: 'neutral',
+      marketRegime, volatilityBucket,
+      reasons: ['Pas assez de données.'],
+      metrics: { priceVsVwapPct: 0, cvdDelta: 0, oiDeltaPct: 0, fundingRate, oiChangeAbs: 0, distanceFromVwapPct: 0 },
     }
   }
-
-  const fundingRate = args.funding?.rate ?? 0
 
   const priceVsVwapPct = ((lastK.close - lastV.vwap) / lastV.vwap) * 100
   const distanceFromVwapPct = Math.abs(priceVsVwapPct)
-
   const cvdDelta = lastCvd.cvd - prevCvd.cvd
-  const oiChangeAbs = lastOi.openInterest - prevOi.openInterest
-  const oiDeltaPct =
-    prevOi.openInterest !== 0
-      ? (oiChangeAbs / prevOi.openInterest) * 100
-      : 0
+  const oiChangeAbs = args.oi.length > 1
+    ? lastOi.openInterest - args.oi[args.oi.length - 2].openInterest
+    : 0
+  const oiDeltaPct = args.oi.length > 1 && args.oi[args.oi.length - 2].openInterest !== 0
+    ? (oiChangeAbs / args.oi[args.oi.length - 2].openInterest) * 100
+    : 0
 
+  const metrics = { priceVsVwapPct, cvdDelta, oiDeltaPct, fundingRate, oiChangeAbs, distanceFromVwapPct }
+
+  const highSweep = detectHighSweep(args.klines)
+  const lowSweep = detectLowSweep(args.klines)
+  const oiExpanded = oiExpanding(args.oi, 5)
+  const oiDone = oiStagningOrFalling(args.oi, 5)
+  const vwapReclaim = detectVwapReclaim(args.klines, args.vwap)
+  const vwapReject = detectVwapReject(args.klines, args.vwap)
+  const hlStructure = detectHL(args.klines)
+  const lhStructure = detectLH(args.klines)
   const aboveVwap = lastK.close > lastV.vwap
   const belowVwap = lastK.close < lastV.vwap
+  const cvdNonStable = Math.abs(cvdDelta) > 0
 
-  const reclaimAboveVwap = prevK.low < prevV.vwap && lastK.close > lastV.vwap
-  const rejectBelowVwap = prevK.high > prevV.vwap && lastK.close < lastV.vwap
+  // ── SETUP A+ SHORT ──
+  {
+    let score = 0
+    const reasons: string[] = []
+    if (highSweep)                          { score += 1; reasons.push('L: Sweep liquidité haute détecté.') }
+    if (oiExpanded)                         { score += 1; reasons.push('F: OI en expansion pendant le sweep.') }
+    if (cvdNonStable && lastCvd.delta > 0)  { score += 1; reasons.push('F: CVD agressif haussier (piège).') }
+    if (vwapReject || belowVwap)            { score += 1; reasons.push('R: Rejet / retour sous VWAP confirmé.') }
+    if (oiDone && lhStructure)              { score += 1; reasons.push('R: OI stagne + structure LH.') }
 
-  const cvdBullNow = lastCvd.delta > 0 && cvdDelta > 0
-  const cvdBearNow = lastCvd.delta < 0 && cvdDelta < 0
-
-  const oiRising = oiDeltaPct > 0.005
-
-  let buyScore = 0
-  let sellScore = 0
-  const reasons: string[] = []
-  let signalType: SignalPayload['signalType'] = 'neutral'
-
-  if (aboveVwap) {
-    buyScore += 1
-    reasons.push('Prix au-dessus de la VWAP.')
-  }
-
-  if (belowVwap) {
-    sellScore += 1
-    reasons.push('Prix sous la VWAP.')
-  }
-
-  if (aboveVwap && cvdBullNow && oiRising) {
-    buyScore += 3
-    signalType = 'continuation_long'
-    reasons.push('Continuation long : VWAP + CVD + OI alignés.')
-  }
-
-  if (belowVwap && cvdBearNow && oiRising) {
-    sellScore += 3
-    signalType = 'continuation_short'
-    reasons.push('Continuation short : VWAP + CVD + OI alignés.')
-  }
-
-  if (
-    marketRegime === 'breakout' &&
-    ((aboveVwap && lastK.close > prevK.high) ||
-      (belowVwap && lastK.close < prevK.low))
-  ) {
-    if (aboveVwap) {
-      buyScore += 3
-      signalType = 'breakout'
-      reasons.push('Breakout haussier confirmé.')
-    }
-
-    if (belowVwap) {
-      sellScore += 3
-      signalType = 'breakout'
-      reasons.push('Breakout baissier confirmé.')
+    if (score >= 4) {
+      return {
+        action: 'SELL', confidence: score,
+        signalType: 'bearish_retest',
+        marketRegime, volatilityBucket, reasons, metrics,
+      }
     }
   }
 
-  if (aboveVwap && reclaimAboveVwap && cvdBullNow) {
-    buyScore += 3
-    signalType = 'bullish_retest'
-    reasons.push('Bullish retest de la VWAP.')
-  }
+  // ── SETUP A+ LONG ──
+  {
+    let score = 0
+    const reasons: string[] = []
+    if (lowSweep)                           { score += 1; reasons.push('L: Sweep liquidité basse détecté.') }
+    if (oiExpanded)                         { score += 1; reasons.push('F: OI en expansion pendant le sweep.') }
+    if (cvdNonStable && lastCvd.delta < 0)  { score += 1; reasons.push('F: CVD agressif baissier (short squeeze).') }
+    if (vwapReclaim || aboveVwap)           { score += 1; reasons.push('R: Reclaim VWAP confirmé.') }
+    if (oiDone && hlStructure)              { score += 1; reasons.push('R: OI stagne + structure HL.') }
 
-  if (belowVwap && rejectBelowVwap && cvdBearNow) {
-    sellScore += 3
-    signalType = 'bearish_retest'
-    reasons.push('Bearish retest de la VWAP.')
-  }
-
-  if (!isValidSignalType(signalType)) {
-    return {
-      action: 'STABLE',
-      confidence: 1,
-      signalType: 'neutral',
-      marketRegime,
-      volatilityBucket,
-      reasons: ['Signal type non valide.'],
-      metrics: {
-        priceVsVwapPct,
-        cvdDelta,
-        oiDeltaPct,
-        fundingRate,
-        oiChangeAbs,
-        distanceFromVwapPct,
-      },
-    }
-  }
-
-  if (!isValidVwapDistance(signalType, priceVsVwapPct)) {
-    return {
-      action: 'STABLE',
-      confidence: 1,
-      signalType,
-      marketRegime,
-      volatilityBucket,
-      reasons: ['Distance VWAP non valide pour ce signal type.'],
-      metrics: {
-        priceVsVwapPct,
-        cvdDelta,
-        oiDeltaPct,
-        fundingRate,
-        oiChangeAbs,
-        distanceFromVwapPct,
-      },
-    }
-  }
-
-  if (
-    (signalType === 'continuation_long' || signalType === 'bullish_retest') &&
-    !aboveVwap
-  ) {
-    return {
-      action: 'STABLE',
-      confidence: 1,
-      signalType,
-      marketRegime,
-      volatilityBucket,
-      reasons: ['BUY interdit sous VWAP.'],
-      metrics: {
-        priceVsVwapPct,
-        cvdDelta,
-        oiDeltaPct,
-        fundingRate,
-        oiChangeAbs,
-        distanceFromVwapPct,
-      },
-    }
-  }
-
-  if (
-    (signalType === 'continuation_short' || signalType === 'bearish_retest') &&
-    !belowVwap
-  ) {
-    return {
-      action: 'STABLE',
-      confidence: 1,
-      signalType,
-      marketRegime,
-      volatilityBucket,
-      reasons: ['SELL interdit au-dessus VWAP.'],
-      metrics: {
-        priceVsVwapPct,
-        cvdDelta,
-        oiDeltaPct,
-        fundingRate,
-        oiChangeAbs,
-        distanceFromVwapPct,
-      },
-    }
-  }
-
-  if (buyScore >= 5 && buyScore > sellScore) {
-    return {
-      action: 'BUY',
-      confidence: 5,
-      signalType,
-      marketRegime,
-      volatilityBucket,
-      reasons,
-      metrics: {
-        priceVsVwapPct,
-        cvdDelta,
-        oiDeltaPct,
-        fundingRate,
-        oiChangeAbs,
-        distanceFromVwapPct,
-      },
-    }
-  }
-
-  if (sellScore >= 5 && sellScore > buyScore) {
-    return {
-      action: 'SELL',
-      confidence: 5,
-      signalType,
-      marketRegime,
-      volatilityBucket,
-      reasons,
-      metrics: {
-        priceVsVwapPct,
-        cvdDelta,
-        oiDeltaPct,
-        fundingRate,
-        oiChangeAbs,
-        distanceFromVwapPct,
-      },
-    }
-  }
-
-  if (buyScore >= 4 && buyScore > sellScore) {
-    return {
-      action: 'BUY',
-      confidence: 4,
-      signalType,
-      marketRegime,
-      volatilityBucket,
-      reasons,
-      metrics: {
-        priceVsVwapPct,
-        cvdDelta,
-        oiDeltaPct,
-        fundingRate,
-        oiChangeAbs,
-        distanceFromVwapPct,
-      },
-    }
-  }
-
-  if (sellScore >= 4 && sellScore > buyScore) {
-    return {
-      action: 'SELL',
-      confidence: 4,
-      signalType,
-      marketRegime,
-      volatilityBucket,
-      reasons,
-      metrics: {
-        priceVsVwapPct,
-        cvdDelta,
-        oiDeltaPct,
-        fundingRate,
-        oiChangeAbs,
-        distanceFromVwapPct,
-      },
+    if (score >= 4) {
+      return {
+        action: 'BUY', confidence: score,
+        signalType: 'bullish_retest',
+        marketRegime, volatilityBucket, reasons, metrics,
+      }
     }
   }
 
   return {
-    action: 'STABLE',
-    confidence: 2,
-    signalType: 'neutral',
-    marketRegime,
-    volatilityBucket,
-    reasons: reasons.length ? reasons : ['Pas de signal propre.'],
-    metrics: {
-      priceVsVwapPct,
-      cvdDelta,
-      oiDeltaPct,
-      fundingRate,
-      oiChangeAbs,
-      distanceFromVwapPct,
-    },
+    action: 'STABLE', confidence: 1, signalType: 'neutral',
+    marketRegime, volatilityBucket,
+    reasons: ['Score LFR insuffisant (< 4/5).'],
+    metrics,
   }
+}
+
+function isValidSignalType(signalType: SignalPayload['signalType']) {
+  return ['bullish_retest', 'bearish_retest'].includes(signalType)
 }
 
 export async function GET(req: NextRequest) {
@@ -501,11 +320,8 @@ export async function GET(req: NextRequest) {
     const lastK = klines.at(-1)
     const prevK = klines.at(-2)
 
-    const bullishStructureBreak =
-      !!lastK && !!prevK && lastK.close > prevK.high
-
-    const bearishStructureBreak =
-      !!lastK && !!prevK && lastK.close < prevK.low
+    const bullishStructureBreak = !!lastK && !!prevK && lastK.close > prevK.high
+    const bearishStructureBreak = !!lastK && !!prevK && lastK.close < prevK.low
 
     const referenceBarKey = `${safeTimeframe}-${lastK?.time ?? 0}`
 
@@ -531,17 +347,13 @@ export async function GET(req: NextRequest) {
         }
       } else if (currentPosition.action !== signal.action) {
         const structureOk =
-          signal.action === 'BUY'
-            ? bullishStructureBreak
-            : bearishStructureBreak
+          signal.action === 'BUY' ? bullishStructureBreak : bearishStructureBreak
 
         const canReverse =
           signal.confidence >= 5 &&
           signal.confidence > currentPosition.confidence &&
           structureOk &&
-          signal.signalType !== 'neutral' &&
           isValidSignalType(signal.signalType) &&
-          isValidVwapDistance(signal.signalType, signal.metrics.priceVsVwapPct) &&
           lastReverseBarKey !== referenceBarKey
 
         if (canReverse) {
@@ -578,19 +390,12 @@ export async function GET(req: NextRequest) {
       timeframe: safeTimeframe,
     })
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : 'Unknown API route error'
-
+    const message = error instanceof Error ? error.message : 'Unknown API route error'
     return NextResponse.json(
       {
         error: message,
-        klines: [],
-        vwap: [],
-        cvd: [],
-        oi: [],
-        ticker: null,
-        funding: null,
-        signal: null,
+        klines: [], vwap: [], cvd: [], oi: [],
+        ticker: null, funding: null, signal: null,
         currentPosition: getCurrentPosition(),
         setupHistory: getRecentSetups(),
         setupStats: getStats(),
