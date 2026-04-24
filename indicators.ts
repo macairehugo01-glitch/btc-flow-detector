@@ -7,7 +7,6 @@ type AggTrade = {
   isBuyerMaker: boolean
 }
 
-// On étend KlineBar pour inclure takerBuyVolume si présent
 type KlineWithTaker = KlineBar & {
   takerBuyVolume?: number
 }
@@ -29,15 +28,13 @@ export function calculateVWAP(klines: KlineBar[], limit: number): VWAPBar[] {
 }
 
 /**
- * CVD calculé depuis le takerBuyVolume des klines Binance.
+ * CVD calculé depuis le takerBuyVolume de chaque kline.
  *
- * Pour chaque bougie :
- *   takerBuyVolume = volume acheté agressivement (market buy)
- *   takerSellVolume = volume total - takerBuyVolume
- *   delta = takerBuyVolume - takerSellVolume
+ * delta = takerBuyVolume - takerSellVolume
+ *       = takerBuyVolume - (volume - takerBuyVolume)
+ *       = 2 * takerBuyVolume - volume
  *
- * Si takerBuyVolume n'est pas disponible (ancienne kline ou autre source),
- * on fall back sur la direction de la bougie (close > open = buy).
+ * Si takerBuyVolume absent → fallback direction de bougie.
  */
 export function calculateCVD(trades: AggTrade[], klines: KlineWithTaker[]): CVDBar[] {
   if (!klines.length) return []
@@ -48,10 +45,7 @@ export function calculateCVD(trades: AggTrade[], klines: KlineWithTaker[]): CVDB
     let delta = 0
 
     if (kline.takerBuyVolume !== undefined && kline.volume > 0) {
-      // Méthode principale : takerBuyVolume depuis Binance Futures klines
-      const takerBuyVol = kline.takerBuyVolume
-      const takerSellVol = kline.volume - takerBuyVol
-      delta = takerBuyVol - takerSellVol
+      delta = 2 * kline.takerBuyVolume - kline.volume
     } else {
       // Fallback : direction de la bougie
       delta = kline.close >= kline.open ? kline.volume : -kline.volume
