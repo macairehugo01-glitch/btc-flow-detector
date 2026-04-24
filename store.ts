@@ -5,11 +5,6 @@ type SetupStatus = 'open' | 'win' | 'loss'
 export type SessionName = 'Asia' | 'London' | 'New York'
 export type Timeframe = '1m' | '5m' | '15m' | '1h'
 
-/**
- * Version COMPATIBLE TRANSITION :
- * on garde les anciens + les nouveaux types
- * pour que le build passe tant que route.ts n'a pas encore été remplacé
- */
 export type SignalType =
   | 'continuation_long'
   | 'continuation_short'
@@ -127,29 +122,39 @@ function hourBucketFromTimestamp(tsMs: number) {
   return `${String(h).padStart(2, '0')}:00-${String(next).padStart(2, '0')}:00`
 }
 
-function buildRiskLevels(entryPrice: number, action: 'BUY' | 'SELL') {
-  const riskMove = entryPrice * 0.002
-  const rr = 2
+/**
+ * Stop basé sur la VWAP avec marge de 0.15% pour absorber le bruit.
+ * Long : stop = VWAP - 0.15% (sous VWAP → invalidation du reclaim)
+ * Short : stop = VWAP + 0.15% (au-dessus VWAP → invalidation du rejet)
+ * TP = entrée + (risk × 2R)
+ */
+function buildRiskLevels(
+  entryPrice: number,
+  action: 'BUY' | 'SELL',
+  vwap: number
+) {
+  const VWAP_BUFFER = 0.0015 // 0.15% de marge bruit de fond
+  const RR = 2
 
   const stopLoss =
-    action === 'BUY' ? entryPrice - riskMove : entryPrice + riskMove
+    action === 'BUY'
+      ? vwap * (1 - VWAP_BUFFER)   // sous VWAP
+      : vwap * (1 + VWAP_BUFFER)   // au-dessus VWAP
+
+  const riskMove = Math.abs(entryPrice - stopLoss)
 
   const takeProfit =
     action === 'BUY'
-      ? entryPrice + riskMove * rr
-      : entryPrice - riskMove * rr
+      ? entryPrice + riskMove * RR
+      : entryPrice - riskMove * RR
 
-  return { stopLoss, takeProfit, rr }
+  return { stopLoss, takeProfit, rr: RR }
 }
 
 function computeRealizedR(setup: StoredSetup, exitPrice: number) {
   const risk = Math.abs(setup.entryPrice - setup.stopLoss)
   if (risk === 0) return 0
-
-  if (setup.action === 'BUY') {
-    return (exitPrice - setup.entryPrice) / risk
-  }
-
+  if (setup.action === 'BUY') return (exitPrice - setup.entryPrice) / risk
   return (setup.entryPrice - exitPrice) / risk
 }
 
@@ -161,8 +166,8 @@ async function notifyOpen(setup: StoredSetup) {
 ${setup.action} ${setup.timeframe}
 
 Price: ${setup.entryPrice}
-SL: ${setup.stopLoss}
-TP: ${setup.takeProfit}
+SL: ${setup.stopLoss.toFixed(2)} (VWAP ±0.15%)
+TP: ${setup.takeProfit.toFixed(2)}
 RR: ${setup.rr}
 
 Confidence: ${setup.confidence}/5
@@ -222,6 +227,7 @@ export async function openPosition(input: {
   action: 'BUY' | 'SELL'
   confidence: number
   entryPrice: number
+  vwap: number
   referenceBarKey: string
 
   signalType: SignalType
@@ -231,7 +237,8 @@ export async function openPosition(input: {
 }) {
   const { stopLoss, takeProfit, rr } = buildRiskLevels(
     input.entryPrice,
-    input.action
+    input.action,
+    input.vwap
   )
 
   const setup: StoredSetup = {
@@ -300,10 +307,7 @@ export async function closeCurrentPositionAtMarket(
   setup.rMultiple = realizedR
   setup.drawdownR = realizedR < 0 ? Math.abs(realizedR) : 0
   setup.closedAt = timestamp
-  setup.durationMinutes = Math.max(
-    0,
-    (timestamp - setup.timestamp) / 1000 / 60
-  )
+  setup.durationMinutes = Math.max(0, (timestamp - setup.timestamp) / 1000 / 60)
   setup.status = realizedR >= 0 ? 'win' : 'loss'
 
   state.currentPosition = null
@@ -317,6 +321,7 @@ export async function reversePosition(input: {
   action: 'BUY' | 'SELL'
   confidence: number
   entryPrice: number
+  vwap: number
   referenceBarKey: string
 
   signalType: SignalType
@@ -354,10 +359,7 @@ export function evaluateOpenSetups(
           setup.rMultiple = hitTp ? setup.rr : -1
           setup.drawdownR = hitTp ? 0 : 1
           setup.closedAt = candle.time * 1000
-          setup.durationMinutes = Math.max(
-            0,
-            (setup.closedAt - setup.timestamp) / 1000 / 60
-          )
+          setup.durationMinutes = Math.max(0, (setup.closedAt - setup.timestamp) / 1000 / 60)
           if (state.currentPosition?.setupId === setup.id) state.currentPosition = null
           notifyClose(setup)
           changed = true
@@ -373,10 +375,7 @@ export function evaluateOpenSetups(
           setup.rMultiple = hitTp ? setup.rr : -1
           setup.drawdownR = hitTp ? 0 : 1
           setup.closedAt = candle.time * 1000
-          setup.durationMinutes = Math.max(
-            0,
-            (setup.closedAt - setup.timestamp) / 1000 / 60
-          )
+          setup.durationMinutes = Math.max(0, (setup.closedAt - setup.timestamp) / 1000 / 60)
           if (state.currentPosition?.setupId === setup.id) state.currentPosition = null
           notifyClose(setup)
           changed = true
