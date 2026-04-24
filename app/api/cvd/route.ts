@@ -41,6 +41,7 @@ type SignalPayload = {
   marketRegime: 'trend' | 'range' | 'breakout' | 'reversal'
   volatilityBucket: 'low' | 'medium' | 'high'
   reasons: string[]
+  vwap: number
   metrics: {
     priceVsVwapPct: number
     cvdDelta: number
@@ -51,7 +52,7 @@ type SignalPayload = {
   }
 }
 
-// ─── OI BUFFER (persisté sur disque pour survivre aux redémarrages) ──────────
+// ─── OI BUFFER persisté sur disque ──────────────────────────────────────────
 const MAX_OI_POINTS = 500
 let oiSessionBuffer: OIBar[] = loadOIBuffer()
 
@@ -79,6 +80,18 @@ function buildOiSeriesForKlines(klines: Array<{ time: number }>): OIBar[] {
     }
     return { time: k.time, openInterest: matched.openInterest }
   })
+}
+
+// ─── WEEKEND FILTER ──────────────────────────────────────────────────────────
+
+/**
+ * Pas de trades le weekend (Sam + Dim UTC).
+ * BTC trade 24/7 mais la liquidité institutionnelle est absente le weekend
+ * → sweeps peu fiables, beaucoup de faux signaux.
+ */
+function isWeekend(): boolean {
+  const day = new Date().getUTCDay()
+  return day === 0 || day === 6 // 0 = Dimanche, 6 = Samedi
 }
 
 // ─── VOLATILITY & REGIME ─────────────────────────────────────────────────────
@@ -117,24 +130,72 @@ function getMarketRegime(
   return 'range'
 }
 
+// ─── HTF BIAS (1h) ───────────────────────────────────────────────────────────
+
+/**
+ * Biais HTF basé sur la position du prix vs VWAP 1h.
+ * On utilise les klines 5m disponibles pour approximer le biais 1h
+ * en regardant les 12 dernières bougies 5m (= 1h).
+ */
+function getHTFBias(
+  klines: Array<{ close: number }>,
+  vwap: Array<{ vwap: number }>
+): 'bullish' | 'bearish' | 'neutral' {
+  // Moyenne des 12 dernières clôtures (= 1h sur 5m)
+  const sample = klines.slice(-12)
+  const vwapSample = vwap.slice(-12)
+  if (sample.length < 6 || vwapSample.length < 6) return 'neutral'
+
+  const avgClose = sample.reduce((s, k) => s + k.close, 0) / sample.length
+  const avgVwap = vwapSample.reduce((s, v) => s + v.vwap, 0) / vwapSample.length
+
+  const diff = ((avgClose - avgVwap) / avgVwap) * 100
+  if (diff > 0.05) return 'bullish'
+  if (diff < -0.05) return 'bearish'
+  return 'neutral'
+}
+
 // ─── LFR HELPERS ─────────────────────────────────────────────────────────────
 
 /**
- * FIX: Sweep détecté sur la bougie FERMÉE (at(-2)) et non la bougie en cours.
- * Evite les faux signaux sur bougies encore ouvertes.
+ * Qualité du sweep : le wick doit représenter > 60% de la bougie.
+ * Filtre les faux sweeps sur petites bougies sans wick significatif.
+ */
+function hasSweepWickQuality(
+  candle: { open: number; high: number; low: number; close: number },
+  direction: 'high' | 'low'
+): boolean {
+  const bodySize = Math.abs(candle.close - candle.open)
+  const totalSize = candle.high - candle.low
+  if (totalSize === 0) return false
+
+  if (direction === 'high') {
+    const upperWick = candle.high - Math.max(candle.open, candle.close)
+    return upperWick / totalSize > 0.6
+  } else {
+    const lowerWick = Math.min(candle.open, candle.close) - candle.low
+    return lowerWick / totalSize > 0.6
+  }
+}
+
+/**
+ * Sweep haute confirmé sur bougie FERMÉE avec qualité de wick.
  */
 function detectHighSweep(
   klines: Array<{ high: number; low: number; close: number; open: number }>
 ): boolean {
-  // 50 bougies de lookback, excluant la bougie en cours ET la bougie fermée
   const lookback = klines.slice(-52, -2)
   if (lookback.length < 10) return false
   const structureHigh = Math.max(...lookback.map((k) => k.high))
-  // On regarde la bougie fermée (at(-2)), pas la bougie en cours (at(-1))
   const lastClosed = klines.at(-2)!
-  return lastClosed.high > structureHigh && lastClosed.close < structureHigh
+  const swept = lastClosed.high > structureHigh && lastClosed.close < structureHigh
+  if (!swept) return false
+  return hasSweepWickQuality(lastClosed, 'high')
 }
 
+/**
+ * Sweep basse confirmé sur bougie FERMÉE avec qualité de wick.
+ */
 function detectLowSweep(
   klines: Array<{ high: number; low: number; close: number; open: number }>
 ): boolean {
@@ -142,7 +203,36 @@ function detectLowSweep(
   if (lookback.length < 10) return false
   const structureLow = Math.min(...lookback.map((k) => k.low))
   const lastClosed = klines.at(-2)!
-  return lastClosed.low < structureLow && lastClosed.close > structureLow
+  const swept = lastClosed.low < structureLow && lastClosed.close > structureLow
+  if (!swept) return false
+  return hasSweepWickQuality(lastClosed, 'low')
+}
+
+/**
+ * Volume du sweep anormalement élevé (> 1.5x la moyenne des 20 dernières bougies).
+ * Signature des liquidations de stops institutionnels.
+ */
+function hasSweepVolume(
+  klines: Array<{ volume: number }>
+): boolean {
+  const sample = klines.slice(-22, -2)
+  if (sample.length < 10) return true // pas assez de données → on ne bloque pas
+  const avgVolume = sample.reduce((s, k) => s + k.volume, 0) / sample.length
+  const sweepCandle = klines.at(-2)!
+  return sweepCandle.volume > avgVolume * 1.5
+}
+
+/**
+ * Chute rapide d'OI = liquidations massives de stops.
+ * OI baisse de > 0.1% sur 2 bougies.
+ */
+function hasOILiquidationDrop(oi: OIBar[]): boolean {
+  if (oi.length < 3) return false
+  const recent = oi.slice(-3)
+  const oiStart = recent[0].openInterest
+  const oiEnd = recent[recent.length - 1].openInterest
+  const changePct = ((oiEnd - oiStart) / oiStart) * 100
+  return changePct < -0.1
 }
 
 function oiStagningOrFalling(oi: OIBar[], lookbackBars = 5): boolean {
@@ -152,15 +242,6 @@ function oiStagningOrFalling(oi: OIBar[], lookbackBars = 5): boolean {
   const oiEnd = recent[recent.length - 1].openInterest
   const changePct = ((oiEnd - oiStart) / oiStart) * 100
   return changePct <= 0.01
-}
-
-function oiExpanding(oi: OIBar[], lookbackBars = 5): boolean {
-  if (oi.length < lookbackBars + 1) return false
-  const recent = oi.slice(-(lookbackBars + 1))
-  const oiStart = recent[0].openInterest
-  const oiEnd = recent[recent.length - 1].openInterest
-  const changePct = ((oiEnd - oiStart) / oiStart) * 100
-  return changePct > 0.02
 }
 
 function detectVwapReclaim(
@@ -204,7 +285,7 @@ function detectLH(klines: Array<{ high: number }>): boolean {
 // ─── SCORE LFR 0–5 ───────────────────────────────────────────────────────────
 
 function computeSignal(args: {
-  klines: Array<{ open: number; high: number; low: number; close: number }>
+  klines: Array<{ open: number; high: number; low: number; close: number; volume: number }>
   vwap: Array<{ vwap: number }>
   cvd: Array<{ delta: number; cvd: number }>
   oi: OIBar[]
@@ -220,31 +301,32 @@ function computeSignal(args: {
   const marketRegime = getMarketRegime(args.klines)
   const volatilityBucket = getVolatilityBucket(args.klines)
   const fundingRate = args.funding?.rate ?? 0
+  const currentVwap = lastV?.vwap ?? 0
 
-  if (!lastK || !prevK || !lastV || !lastCvd || !prevCvd || !lastOi) {
-    return {
-      action: 'STABLE', confidence: 1, signalType: 'neutral',
-      marketRegime, volatilityBucket,
-      reasons: ['Pas assez de données.'],
-      metrics: { priceVsVwapPct: 0, cvdDelta: 0, oiDeltaPct: 0, fundingRate, oiChangeAbs: 0, distanceFromVwapPct: 0 },
-    }
+  const stable: SignalPayload = {
+    action: 'STABLE', confidence: 1, signalType: 'neutral',
+    marketRegime, volatilityBucket, vwap: currentVwap,
+    reasons: ['Pas assez de données.'],
+    metrics: { priceVsVwapPct: 0, cvdDelta: 0, oiDeltaPct: 0, fundingRate, oiChangeAbs: 0, distanceFromVwapPct: 0 },
   }
+
+  if (!lastK || !prevK || !lastV || !lastCvd || !prevCvd || !lastOi) return stable
 
   const priceVsVwapPct = ((lastK.close - lastV.vwap) / lastV.vwap) * 100
   const distanceFromVwapPct = Math.abs(priceVsVwapPct)
   const cvdDelta = lastCvd.cvd - prevCvd.cvd
   const oiChangeAbs = args.oi.length > 1
-    ? lastOi.openInterest - args.oi[args.oi.length - 2].openInterest
-    : 0
+    ? lastOi.openInterest - args.oi[args.oi.length - 2].openInterest : 0
   const oiDeltaPct = args.oi.length > 1 && args.oi[args.oi.length - 2].openInterest !== 0
-    ? (oiChangeAbs / args.oi[args.oi.length - 2].openInterest) * 100
-    : 0
+    ? (oiChangeAbs / args.oi[args.oi.length - 2].openInterest) * 100 : 0
 
   const metrics = { priceVsVwapPct, cvdDelta, oiDeltaPct, fundingRate, oiChangeAbs, distanceFromVwapPct }
 
+  const htfBias = getHTFBias(args.klines, args.vwap)
   const highSweep = detectHighSweep(args.klines)
   const lowSweep = detectLowSweep(args.klines)
-  const oiExpanded = oiExpanding(args.oi, 5)
+  const sweepVolumeOk = hasSweepVolume(args.klines)
+  const oiLiquidated = hasOILiquidationDrop(args.oi)
   const oiDone = oiStagningOrFalling(args.oi, 5)
   const vwapReclaim = detectVwapReclaim(args.klines, args.vwap)
   const vwapReject = detectVwapReject(args.klines, args.vwap)
@@ -254,13 +336,20 @@ function computeSignal(args: {
   const belowVwap = lastK.close < lastV.vwap
   const cvdNonStable = Math.abs(cvdDelta) > 0
 
-  // ── SETUP A+ SHORT (Institutional trap) ──
-  {
+  // ── SETUP A+ SHORT ──
+  // Filtré si biais HTF haussier (on évite de shorter un trend long)
+  if (htfBias !== 'bullish') {
     let score = 0
     const reasons: string[] = []
-    if (highSweep)                          { score += 1; reasons.push('L: Sweep liquidité haute détecté (bougie fermée).') }
-    if (oiExpanded)                         { score += 1; reasons.push('F: OI en expansion pendant le sweep.') }
-    if (cvdNonStable && lastCvd.delta > 0)  { score += 1; reasons.push('F: CVD agressif haussier (piège institutionnel).') }
+
+    if (highSweep)                          { score += 1; reasons.push('L: Sweep liquidité haute (bougie fermée, wick >60%).') }
+    if (sweepVolumeOk)                      { score += 1; reasons.push('F: Volume sweep > 1.5x moyenne (liquidations stops).') }
+    if (oiLiquidated || cvdNonStable && lastCvd.delta > 0) {
+      score += 1
+      reasons.push(oiLiquidated
+        ? 'F: Chute OI rapide = liquidations massives détectées.'
+        : 'F: CVD agressif haussier (piège institutionnel).')
+    }
     if (vwapReject || belowVwap)            { score += 1; reasons.push('R: Rejet / retour sous VWAP confirmé.') }
     if (oiDone && lhStructure)              { score += 1; reasons.push('R: OI stagne + structure LH (divergence flux-prix).') }
 
@@ -268,18 +357,25 @@ function computeSignal(args: {
       return {
         action: 'SELL', confidence: score,
         signalType: 'bearish_retest',
-        marketRegime, volatilityBucket, reasons, metrics,
+        marketRegime, volatilityBucket, vwap: lastV.vwap, reasons, metrics,
       }
     }
   }
 
-  // ── SETUP A+ LONG (Reclaim / short squeeze) ──
-  {
+  // ── SETUP A+ LONG ──
+  // Filtré si biais HTF baissier
+  if (htfBias !== 'bearish') {
     let score = 0
     const reasons: string[] = []
-    if (lowSweep)                           { score += 1; reasons.push('L: Sweep liquidité basse détecté (bougie fermée).') }
-    if (oiExpanded)                         { score += 1; reasons.push('F: OI en expansion pendant le sweep.') }
-    if (cvdNonStable && lastCvd.delta < 0)  { score += 1; reasons.push('F: CVD agressif baissier (short squeeze potentiel).') }
+
+    if (lowSweep)                           { score += 1; reasons.push('L: Sweep liquidité basse (bougie fermée, wick >60%).') }
+    if (sweepVolumeOk)                      { score += 1; reasons.push('F: Volume sweep > 1.5x moyenne (liquidations stops).') }
+    if (oiLiquidated || cvdNonStable && lastCvd.delta < 0) {
+      score += 1
+      reasons.push(oiLiquidated
+        ? 'F: Chute OI rapide = liquidations massives détectées.'
+        : 'F: CVD agressif baissier (short squeeze potentiel).')
+    }
     if (vwapReclaim || aboveVwap)           { score += 1; reasons.push('R: Reclaim VWAP confirmé.') }
     if (oiDone && hlStructure)              { score += 1; reasons.push('R: OI stagne + structure HL (shorts ferment).') }
 
@@ -287,14 +383,14 @@ function computeSignal(args: {
       return {
         action: 'BUY', confidence: score,
         signalType: 'bullish_retest',
-        marketRegime, volatilityBucket, reasons, metrics,
+        marketRegime, volatilityBucket, vwap: lastV.vwap, reasons, metrics,
       }
     }
   }
 
   return {
     action: 'STABLE', confidence: 1, signalType: 'neutral',
-    marketRegime, volatilityBucket,
+    marketRegime, volatilityBucket, vwap: currentVwap,
     reasons: ['Score LFR insuffisant (< 4/5).'],
     metrics,
   }
@@ -311,7 +407,6 @@ export async function GET(req: NextRequest) {
     : '5m'
 
   try {
-    // FIX: 500 trades au lieu de 100 pour un CVD plus représentatif
     const [klines, trades, oiSnapshot, ticker, funding] = await Promise.all([
       fetchKlines(safeTimeframe, 200),
       fetchAggTrades(500),
@@ -341,7 +436,10 @@ export async function GET(req: NextRequest) {
 
     const referenceBarKey = `${safeTimeframe}-${lastK?.time ?? 0}`
 
-    if (ticker && (signal.action === 'BUY' || signal.action === 'SELL')) {
+    // ── FILTRE WEEKEND ──
+    const weekend = isWeekend()
+
+    if (!weekend && ticker && (signal.action === 'BUY' || signal.action === 'SELL')) {
       if (!currentPosition) {
         if (
           signal.confidence >= 4 &&
@@ -354,6 +452,7 @@ export async function GET(req: NextRequest) {
             action: signal.action,
             confidence: signal.confidence,
             entryPrice: ticker.price,
+            vwap: signal.vwap,
             referenceBarKey,
             signalType: signal.signalType,
             marketRegime: signal.marketRegime,
@@ -380,6 +479,7 @@ export async function GET(req: NextRequest) {
             action: signal.action,
             confidence: signal.confidence,
             entryPrice: ticker.price,
+            vwap: signal.vwap,
             referenceBarKey,
             signalType: signal.signalType,
             marketRegime: signal.marketRegime,
@@ -398,6 +498,7 @@ export async function GET(req: NextRequest) {
       ticker,
       funding,
       signal,
+      weekend,
       currentPosition: getCurrentPosition(),
       setupHistory: getRecentSetups(),
       setupStats: getStats(),
@@ -412,6 +513,7 @@ export async function GET(req: NextRequest) {
         error: message,
         klines: [], vwap: [], cvd: [], oi: [],
         ticker: null, funding: null, signal: null,
+        weekend: isWeekend(),
         currentPosition: getCurrentPosition(),
         setupHistory: getRecentSetups(),
         setupStats: getStats(),
