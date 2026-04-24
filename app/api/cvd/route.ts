@@ -19,6 +19,7 @@ import {
   openPosition,
   reversePosition,
 } from '../../../store'
+import { loadOIBuffer, saveOIBuffer } from '../../../journalPersistence'
 
 export const dynamic = 'force-dynamic'
 
@@ -50,16 +51,22 @@ type SignalPayload = {
   }
 }
 
-const oiSessionBuffer: OIBar[] = []
+// ─── OI BUFFER (persisté sur disque pour survivre aux redémarrages) ──────────
 const MAX_OI_POINTS = 500
+let oiSessionBuffer: OIBar[] = loadOIBuffer()
 
 function pushOiSnapshot(snapshot: OIBar) {
   const last = oiSessionBuffer.at(-1)
-  if (!last) { oiSessionBuffer.push(snapshot); return }
+  if (!last) {
+    oiSessionBuffer.push(snapshot)
+    saveOIBuffer(oiSessionBuffer)
+    return
+  }
   if (snapshot.time !== last.time || snapshot.openInterest !== last.openInterest) {
     oiSessionBuffer.push(snapshot)
+    while (oiSessionBuffer.length > MAX_OI_POINTS) oiSessionBuffer.shift()
+    saveOIBuffer(oiSessionBuffer)
   }
-  while (oiSessionBuffer.length > MAX_OI_POINTS) oiSessionBuffer.shift()
 }
 
 function buildOiSeriesForKlines(klines: Array<{ time: number }>): OIBar[] {
@@ -73,6 +80,8 @@ function buildOiSeriesForKlines(klines: Array<{ time: number }>): OIBar[] {
     return { time: k.time, openInterest: matched.openInterest }
   })
 }
+
+// ─── VOLATILITY & REGIME ─────────────────────────────────────────────────────
 
 function getVolatilityBucket(
   klines: Array<{ high: number; low: number; close: number }>
@@ -108,26 +117,32 @@ function getMarketRegime(
   return 'range'
 }
 
-// ─── LFR HELPERS ────────────────────────────────────────────────────────────
+// ─── LFR HELPERS ─────────────────────────────────────────────────────────────
 
+/**
+ * FIX: Sweep détecté sur la bougie FERMÉE (at(-2)) et non la bougie en cours.
+ * Evite les faux signaux sur bougies encore ouvertes.
+ */
 function detectHighSweep(
   klines: Array<{ high: number; low: number; close: number; open: number }>
 ): boolean {
-  const lookback = klines.slice(-51, -1)
+  // 50 bougies de lookback, excluant la bougie en cours ET la bougie fermée
+  const lookback = klines.slice(-52, -2)
   if (lookback.length < 10) return false
   const structureHigh = Math.max(...lookback.map((k) => k.high))
-  const last = klines.at(-1)!
-  return last.high > structureHigh && last.close < structureHigh
+  // On regarde la bougie fermée (at(-2)), pas la bougie en cours (at(-1))
+  const lastClosed = klines.at(-2)!
+  return lastClosed.high > structureHigh && lastClosed.close < structureHigh
 }
 
 function detectLowSweep(
   klines: Array<{ high: number; low: number; close: number; open: number }>
 ): boolean {
-  const lookback = klines.slice(-51, -1)
+  const lookback = klines.slice(-52, -2)
   if (lookback.length < 10) return false
   const structureLow = Math.min(...lookback.map((k) => k.low))
-  const last = klines.at(-1)!
-  return last.low < structureLow && last.close > structureLow
+  const lastClosed = klines.at(-2)!
+  return lastClosed.low < structureLow && lastClosed.close > structureLow
 }
 
 function oiStagningOrFalling(oi: OIBar[], lookbackBars = 5): boolean {
@@ -186,7 +201,7 @@ function detectLH(klines: Array<{ high: number }>): boolean {
   return last.high < prev.high
 }
 
-// ─── SCORE LFR 0–5 ──────────────────────────────────────────────────────────
+// ─── SCORE LFR 0–5 ───────────────────────────────────────────────────────────
 
 function computeSignal(args: {
   klines: Array<{ open: number; high: number; low: number; close: number }>
@@ -239,15 +254,15 @@ function computeSignal(args: {
   const belowVwap = lastK.close < lastV.vwap
   const cvdNonStable = Math.abs(cvdDelta) > 0
 
-  // ── SETUP A+ SHORT ──
+  // ── SETUP A+ SHORT (Institutional trap) ──
   {
     let score = 0
     const reasons: string[] = []
-    if (highSweep)                          { score += 1; reasons.push('L: Sweep liquidité haute détecté.') }
+    if (highSweep)                          { score += 1; reasons.push('L: Sweep liquidité haute détecté (bougie fermée).') }
     if (oiExpanded)                         { score += 1; reasons.push('F: OI en expansion pendant le sweep.') }
-    if (cvdNonStable && lastCvd.delta > 0)  { score += 1; reasons.push('F: CVD agressif haussier (piège).') }
+    if (cvdNonStable && lastCvd.delta > 0)  { score += 1; reasons.push('F: CVD agressif haussier (piège institutionnel).') }
     if (vwapReject || belowVwap)            { score += 1; reasons.push('R: Rejet / retour sous VWAP confirmé.') }
-    if (oiDone && lhStructure)              { score += 1; reasons.push('R: OI stagne + structure LH.') }
+    if (oiDone && lhStructure)              { score += 1; reasons.push('R: OI stagne + structure LH (divergence flux-prix).') }
 
     if (score >= 4) {
       return {
@@ -258,15 +273,15 @@ function computeSignal(args: {
     }
   }
 
-  // ── SETUP A+ LONG ──
+  // ── SETUP A+ LONG (Reclaim / short squeeze) ──
   {
     let score = 0
     const reasons: string[] = []
-    if (lowSweep)                           { score += 1; reasons.push('L: Sweep liquidité basse détecté.') }
+    if (lowSweep)                           { score += 1; reasons.push('L: Sweep liquidité basse détecté (bougie fermée).') }
     if (oiExpanded)                         { score += 1; reasons.push('F: OI en expansion pendant le sweep.') }
-    if (cvdNonStable && lastCvd.delta < 0)  { score += 1; reasons.push('F: CVD agressif baissier (short squeeze).') }
+    if (cvdNonStable && lastCvd.delta < 0)  { score += 1; reasons.push('F: CVD agressif baissier (short squeeze potentiel).') }
     if (vwapReclaim || aboveVwap)           { score += 1; reasons.push('R: Reclaim VWAP confirmé.') }
-    if (oiDone && hlStructure)              { score += 1; reasons.push('R: OI stagne + structure HL.') }
+    if (oiDone && hlStructure)              { score += 1; reasons.push('R: OI stagne + structure HL (shorts ferment).') }
 
     if (score >= 4) {
       return {
@@ -296,9 +311,10 @@ export async function GET(req: NextRequest) {
     : '5m'
 
   try {
+    // FIX: 500 trades au lieu de 100 pour un CVD plus représentatif
     const [klines, trades, oiSnapshot, ticker, funding] = await Promise.all([
       fetchKlines(safeTimeframe, 200),
-      fetchAggTrades(100),
+      fetchAggTrades(500),
       fetchCurrentOI(),
       fetchTicker(),
       fetchFundingRate(),
