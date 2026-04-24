@@ -1,10 +1,15 @@
 import type { KlineBar, VWAPBar, CVDBar } from './useMarketStore'
 
 type AggTrade = {
-  time: number   // MILLISECONDES (depuis binance.ts)
+  time: number
   price: number
   quantity: number
   isBuyerMaker: boolean
+}
+
+// On étend KlineBar pour inclure takerBuyVolume si présent
+type KlineWithTaker = KlineBar & {
+  takerBuyVolume?: number
 }
 
 export function calculateVWAP(klines: KlineBar[], limit: number): VWAPBar[] {
@@ -23,24 +28,34 @@ export function calculateVWAP(klines: KlineBar[], limit: number): VWAPBar[] {
   })
 }
 
-export function calculateCVD(trades: AggTrade[], klines: KlineBar[]): CVDBar[] {
+/**
+ * CVD calculé depuis le takerBuyVolume des klines Binance.
+ *
+ * Pour chaque bougie :
+ *   takerBuyVolume = volume acheté agressivement (market buy)
+ *   takerSellVolume = volume total - takerBuyVolume
+ *   delta = takerBuyVolume - takerSellVolume
+ *
+ * Si takerBuyVolume n'est pas disponible (ancienne kline ou autre source),
+ * on fall back sur la direction de la bougie (close > open = buy).
+ */
+export function calculateCVD(trades: AggTrade[], klines: KlineWithTaker[]): CVDBar[] {
   if (!klines.length) return []
 
   let runningCvd = 0
 
-  return klines.map((kline, index) => {
-    // kline.time est en SECONDES → convertir en ms pour matcher les trades
-    const startMs = kline.time * 1000
-    const endMs = index < klines.length - 1
-      ? klines[index + 1].time * 1000
-      : Infinity
+  return klines.map((kline) => {
+    let delta = 0
 
-    const delta = trades
-      .filter((trade) => trade.time >= startMs && trade.time < endMs)
-      .reduce((sum, trade) => {
-        const signedQty = trade.isBuyerMaker ? -trade.quantity : trade.quantity
-        return sum + signedQty
-      }, 0)
+    if (kline.takerBuyVolume !== undefined && kline.volume > 0) {
+      // Méthode principale : takerBuyVolume depuis Binance Futures klines
+      const takerBuyVol = kline.takerBuyVolume
+      const takerSellVol = kline.volume - takerBuyVol
+      delta = takerBuyVol - takerSellVol
+    } else {
+      // Fallback : direction de la bougie
+      delta = kline.close >= kline.open ? kline.volume : -kline.volume
+    }
 
     runningCvd += delta
 
