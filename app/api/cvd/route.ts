@@ -312,15 +312,6 @@ function computeSignal(args: {
 
   if (!lastK || !prevK || !lastV || !lastCvd || !prevCvd || !lastOi) return stable
 
-  if (volatilityBucket === 'low') {
-    return {
-      ...stable,
-      vwap: currentVwap,
-      reasons: ['Volatilité trop faible — sweeps non fiables.'],
-      metrics: { priceVsVwapPct: 0, cvdDelta: 0, oiDeltaPct: 0, fundingRate, oiChangeAbs: 0, distanceFromVwapPct: 0 },
-    }
-  }
-
   const priceVsVwapPct = ((lastK.close - lastV.vwap) / lastV.vwap) * 100
   const distanceFromVwapPct = Math.abs(priceVsVwapPct)
   const cvdDelta = lastCvd.cvd - prevCvd.cvd
