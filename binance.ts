@@ -58,16 +58,11 @@ async function httpJson<T>(url: string): Promise<T> {
 
 function mapTimeframeToOkx(tf: string): string {
   switch (tf) {
-    case '1m':
-      return '1m'
-    case '5m':
-      return '5m'
-    case '15m':
-      return '15m'
-    case '1h':
-      return '1H'
-    default:
-      return '5m'
+    case '1m': return '1m'
+    case '5m': return '5m'
+    case '15m': return '15m'
+    case '1h': return '1H'
+    default: return '5m'
   }
 }
 
@@ -85,7 +80,7 @@ export async function fetchKlines(timeframe: string, limit: number): Promise<Kli
   return [...data.data]
     .reverse()
     .map((k) => ({
-      time: Math.floor(Number(k[0]) / 1000),
+      time: Math.floor(Number(k[0]) / 1000), // secondes
       open: Number(k[1]),
       high: Number(k[2]),
       low: Number(k[3]),
@@ -94,39 +89,62 @@ export async function fetchKlines(timeframe: string, limit: number): Promise<Kli
     }))
 }
 
+/**
+ * OKX /trades limite à 100 par requête.
+ * On fait plusieurs appels avec pagination (after) pour collecter
+ * jusqu'à 500 trades et couvrir les dernières bougies 5m.
+ * Les timestamps sont gardés en MILLISECONDES pour le CVD.
+ */
 export async function fetchAggTrades(limit: number): Promise<AggTrade[]> {
-  const capped = Math.min(Math.max(limit, 1), 100)
+  const perPage = 100
+  const pages = Math.ceil(Math.min(limit, 500) / perPage)
 
-  const data = await httpJson<
-    OkxResponse<{
-      instId: string
-      tradeId: string
-      px: string
-      sz: string
-      side: 'buy' | 'sell'
-      ts: string
-    }>
-  >(
-    `${OKX_BASE}/api/v5/market/trades?instId=BTC-USDT-SWAP&limit=${capped}`
-  )
+  const allTrades: AggTrade[] = []
+  let afterTradeId: string | null = null
 
-  if (data.code !== '0') {
-    throw new Error(`OKX trades error: ${data.msg}`)
-  }
+  for (let i = 0; i < pages; i++) {
+    const url = afterTradeId
+      ? `${OKX_BASE}/api/v5/market/trades?instId=BTC-USDT-SWAP&limit=${perPage}&after=${afterTradeId}`
+      : `${OKX_BASE}/api/v5/market/trades?instId=BTC-USDT-SWAP&limit=${perPage}`
 
-  return [...data.data]
-    .reverse()
-    .map((t) => ({
-      time: Math.floor(Number(t.ts) / 1000),
+    const data = await httpJson<
+      OkxResponse<{
+        instId: string
+        tradeId: string
+        px: string
+        sz: string
+        side: 'buy' | 'sell'
+        ts: string
+      }>
+    >(url)
+
+    if (data.code !== '0' || !data.data.length) break
+
+    const trades = data.data.map((t) => ({
+      time: Number(t.ts), // MILLISECONDES — important pour le matching CVD
       price: Number(t.px),
       quantity: Number(t.sz),
       isBuyerMaker: t.side === 'sell',
+      tradeId: t.tradeId,
+    }))
+
+    allTrades.push(...trades)
+
+    // Pagination : after = tradeId le plus ancien de la page
+    afterTradeId = data.data[data.data.length - 1].tradeId
+  }
+
+  // Retourner dans l'ordre chronologique
+  return allTrades
+    .sort((a, b) => a.time - b.time)
+    .map(({ time, price, quantity, isBuyerMaker }) => ({
+      time,
+      price,
+      quantity,
+      isBuyerMaker,
     }))
 }
 
-/**
- * Snapshot OI current
- */
 export async function fetchCurrentOI(): Promise<OIBar> {
   const data = await httpJson<
     OkxResponse<{
@@ -151,10 +169,6 @@ export async function fetchCurrentOI(): Promise<OIBar> {
   }
 }
 
-/**
- * Compat ancienne signature.
- * On retourne juste un snapshot répété si tu l'appelles encore ailleurs.
- */
 export async function fetchOIHistory(_period: string, limit: number): Promise<OIBar[]> {
   const current = await fetchCurrentOI()
   return Array.from({ length: limit }, (_, i) => ({
@@ -193,14 +207,7 @@ export async function fetchTicker(): Promise<TickerData> {
     }
   } catch {
     const cg = await httpJson<
-      Record<
-        string,
-        {
-          usd: number
-          usd_24h_change: number
-          usd_24h_vol: number
-        }
-      >
+      Record<string, { usd: number; usd_24h_change: number; usd_24h_vol: number }>
     >(
       `${COINGECKO_BASE}/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true`
     )
