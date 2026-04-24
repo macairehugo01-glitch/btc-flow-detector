@@ -59,25 +59,17 @@ const MAX_OI_POINTS = 500
 let oiSessionBuffer: OIBar[] = loadOIBuffer()
 let oiHistoryLoaded = false
 
-/**
- * Au premier démarrage, on charge l'historique OI Binance (200 points 5m).
- * Ensuite on ajoute juste les nouveaux snapshots au fil du temps.
- */
 async function initOIBufferIfNeeded() {
   if (oiHistoryLoaded) return
   oiHistoryLoaded = true
-
-  if (oiSessionBuffer.length >= 10) return // déjà chargé depuis le disque
+  if (oiSessionBuffer.length >= 10) return
 
   try {
-    const history = await fetchOIHistory('5m', 200)
+    const history = await fetchOIHistory('5min', 200)
     if (history.length > 1) {
-      // Fusionner avec ce qu'on a déjà
       const existing = new Set(oiSessionBuffer.map((p) => p.time))
       for (const point of history) {
-        if (!existing.has(point.time)) {
-          oiSessionBuffer.push(point)
-        }
+        if (!existing.has(point.time)) oiSessionBuffer.push(point)
       }
       oiSessionBuffer.sort((a, b) => a.time - b.time)
       while (oiSessionBuffer.length > MAX_OI_POINTS) oiSessionBuffer.shift()
@@ -114,7 +106,7 @@ function buildOiSeriesForKlines(klines: Array<{ time: number }>): OIBar[] {
   })
 }
 
-// ─── WEEKEND FILTER ──────────────────────────────────────────────────────────
+// ─── WEEKEND ─────────────────────────────────────────────────────────────────
 
 function isWeekend(): boolean {
   const day = new Date().getUTCDay()
@@ -129,8 +121,7 @@ function getVolatilityBucket(
   const sample = klines.slice(-10)
   if (!sample.length) return 'medium'
   const avgRangePct =
-    sample.reduce((sum, k) => sum + ((k.high - k.low) / k.close) * 100, 0) /
-    sample.length
+    sample.reduce((sum, k) => sum + ((k.high - k.low) / k.close) * 100, 0) / sample.length
   if (avgRangePct < 0.35) return 'low'
   if (avgRangePct < 1) return 'medium'
   return 'high'
@@ -321,7 +312,6 @@ function computeSignal(args: {
 
   if (!lastK || !prevK || !lastV || !lastCvd || !prevCvd || !lastOi) return stable
 
-  // ── FILTRE VOLATILITÉ LOW ──
   if (volatilityBucket === 'low') {
     return {
       ...stable,
@@ -359,24 +349,13 @@ function computeSignal(args: {
   if (htfBias !== 'bullish') {
     let score = 0
     const reasons: string[] = []
-
-    if (highSweep)                                        { score += 1; reasons.push('L: Sweep liquidité haute (wick >60%, bougie fermée).') }
-    if (sweepVolumeOk)                                    { score += 1; reasons.push('F: Volume sweep >1.5x moyenne (liquidations stops).') }
-    if (oiLiquidated || (cvdNonStable && lastCvd.delta > 0)) {
-      score += 1
-      reasons.push(oiLiquidated
-        ? 'F: Chute OI rapide = liquidations massives.'
-        : 'F: CVD agressif haussier (piège institutionnel).')
-    }
-    if (vwapReject || belowVwap)                          { score += 1; reasons.push('R: Rejet / retour sous VWAP confirmé.') }
-    if (oiDone && lhStructure)                            { score += 1; reasons.push('R: OI stagne + structure LH (divergence flux-prix).') }
-
+    if (highSweep)                                            { score += 1; reasons.push('L: Sweep liquidité haute (wick >60%, bougie fermée).') }
+    if (sweepVolumeOk)                                        { score += 1; reasons.push('F: Volume sweep >1.5x moyenne.') }
+    if (oiLiquidated || (cvdNonStable && lastCvd.delta > 0)) { score += 1; reasons.push(oiLiquidated ? 'F: Chute OI rapide = liquidations.' : 'F: CVD haussier (piège institutionnel).') }
+    if (vwapReject || belowVwap)                              { score += 1; reasons.push('R: Rejet / retour sous VWAP.') }
+    if (oiDone && lhStructure)                                { score += 1; reasons.push('R: OI stagne + structure LH.') }
     if (score >= 4) {
-      return {
-        action: 'SELL', confidence: score,
-        signalType: 'bearish_retest',
-        marketRegime, volatilityBucket, vwap: lastV.vwap, reasons, metrics,
-      }
+      return { action: 'SELL', confidence: score, signalType: 'bearish_retest', marketRegime, volatilityBucket, vwap: lastV.vwap, reasons, metrics }
     }
   }
 
@@ -384,24 +363,13 @@ function computeSignal(args: {
   if (htfBias !== 'bearish') {
     let score = 0
     const reasons: string[] = []
-
-    if (lowSweep)                                         { score += 1; reasons.push('L: Sweep liquidité basse (wick >60%, bougie fermée).') }
-    if (sweepVolumeOk)                                    { score += 1; reasons.push('F: Volume sweep >1.5x moyenne (liquidations stops).') }
-    if (oiLiquidated || (cvdNonStable && lastCvd.delta < 0)) {
-      score += 1
-      reasons.push(oiLiquidated
-        ? 'F: Chute OI rapide = liquidations massives.'
-        : 'F: CVD agressif baissier (short squeeze potentiel).')
-    }
-    if (vwapReclaim || aboveVwap)                         { score += 1; reasons.push('R: Reclaim VWAP confirmé.') }
-    if (oiDone && hlStructure)                            { score += 1; reasons.push('R: OI stagne + structure HL (shorts ferment).') }
-
+    if (lowSweep)                                             { score += 1; reasons.push('L: Sweep liquidité basse (wick >60%, bougie fermée).') }
+    if (sweepVolumeOk)                                        { score += 1; reasons.push('F: Volume sweep >1.5x moyenne.') }
+    if (oiLiquidated || (cvdNonStable && lastCvd.delta < 0)) { score += 1; reasons.push(oiLiquidated ? 'F: Chute OI rapide = liquidations.' : 'F: CVD baissier (short squeeze).') }
+    if (vwapReclaim || aboveVwap)                             { score += 1; reasons.push('R: Reclaim VWAP confirmé.') }
+    if (oiDone && hlStructure)                                { score += 1; reasons.push('R: OI stagne + structure HL.') }
     if (score >= 4) {
-      return {
-        action: 'BUY', confidence: score,
-        signalType: 'bullish_retest',
-        marketRegime, volatilityBucket, vwap: lastV.vwap, reasons, metrics,
-      }
+      return { action: 'BUY', confidence: score, signalType: 'bullish_retest', marketRegime, volatilityBucket, vwap: lastV.vwap, reasons, metrics }
     }
   }
 
@@ -424,7 +392,6 @@ export async function GET(req: NextRequest) {
     : '5m'
 
   try {
-    // Charger l'historique OI au premier démarrage
     await initOIBufferIfNeeded()
 
     const [klines, trades, oiSnapshot, ticker, funding] = await Promise.all([
@@ -447,13 +414,10 @@ export async function GET(req: NextRequest) {
 
     const currentPosition = getCurrentPosition()
     const lastReverseBarKey = getLastReverseBarKey()
-
     const lastK = klines.at(-1)
     const prevK = klines.at(-2)
-
     const bullishStructureBreak = !!lastK && !!prevK && lastK.close > prevK.high
     const bearishStructureBreak = !!lastK && !!prevK && lastK.close < prevK.low
-
     const referenceBarKey = `${safeTimeframe}-${lastK?.time ?? 0}`
 
     const weekend = isWeekend()
@@ -463,20 +427,12 @@ export async function GET(req: NextRequest) {
       : false
     const vwapDistanceOk = isVwapDistanceValid(signal.metrics.distanceFromVwapPct)
 
-    const canTrade =
-      !weekend &&
-      !cooldown &&
-      !fundingBlocked &&
-      vwapDistanceOk &&
-      signal.action !== 'STABLE'
+    const canTrade = !weekend && !cooldown && !fundingBlocked && vwapDistanceOk && signal.action !== 'STABLE'
 
     if (canTrade && ticker) {
       if (!currentPosition) {
-        if (
-          signal.confidence >= 4 &&
-          !hasRecentDuplicate(signal.action as 'BUY' | 'SELL', safeTimeframe, Date.now())
-        ) {
-          console.log('[TRADE] openPosition appelé:', signal.action, ticker.price)
+        if (signal.confidence >= 4 && !hasRecentDuplicate(signal.action as 'BUY' | 'SELL', safeTimeframe, Date.now())) {
+          console.log('[TRADE] openPosition:', signal.action, ticker.price)
           await openPosition({
             timestamp: Date.now(),
             timeframe: safeTimeframe,
@@ -492,9 +448,7 @@ export async function GET(req: NextRequest) {
           })
         }
       } else if (currentPosition.action !== signal.action) {
-        const structureOk =
-          signal.action === 'BUY' ? bullishStructureBreak : bearishStructureBreak
-
+        const structureOk = signal.action === 'BUY' ? bullishStructureBreak : bearishStructureBreak
         const canReverse =
           signal.confidence >= 5 &&
           signal.confidence > currentPosition.confidence &&
@@ -503,7 +457,7 @@ export async function GET(req: NextRequest) {
           lastReverseBarKey !== referenceBarKey
 
         if (canReverse) {
-          console.log('[TRADE] reversePosition appelé:', signal.action, ticker.price)
+          console.log('[TRADE] reversePosition:', signal.action, ticker.price)
           await reversePosition({
             timestamp: Date.now(),
             timeframe: safeTimeframe,
@@ -522,17 +476,8 @@ export async function GET(req: NextRequest) {
     }
 
     return NextResponse.json({
-      klines,
-      vwap,
-      cvd,
-      oi,
-      ticker,
-      funding,
-      signal,
-      weekend,
-      cooldown,
-      fundingBlocked,
-      vwapDistanceOk,
+      klines, vwap, cvd, oi, ticker, funding, signal,
+      weekend, cooldown, fundingBlocked, vwapDistanceOk,
       oiBufferSize: oiSessionBuffer.length,
       currentPosition: getCurrentPosition(),
       setupHistory: getRecentSetups(),
@@ -548,10 +493,7 @@ export async function GET(req: NextRequest) {
         error: message,
         klines: [], vwap: [], cvd: [], oi: [],
         ticker: null, funding: null, signal: null,
-        weekend: isWeekend(),
-        cooldown: false,
-        fundingBlocked: false,
-        vwapDistanceOk: true,
+        weekend: isWeekend(), cooldown: false, fundingBlocked: false, vwapDistanceOk: true,
         oiBufferSize: oiSessionBuffer.length,
         currentPosition: getCurrentPosition(),
         setupHistory: getRecentSetups(),
