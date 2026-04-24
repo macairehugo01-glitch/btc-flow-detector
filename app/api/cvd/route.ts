@@ -3,6 +3,7 @@ import {
   fetchKlines,
   fetchAggTrades,
   fetchCurrentOI,
+  fetchOIHistory,
   fetchTicker,
   fetchFundingRate,
 } from '../../../binance'
@@ -53,9 +54,39 @@ type SignalPayload = {
   }
 }
 
-// ─── OI BUFFER persisté sur disque ──────────────────────────────────────────
+// ─── OI BUFFER ───────────────────────────────────────────────────────────────
 const MAX_OI_POINTS = 500
 let oiSessionBuffer: OIBar[] = loadOIBuffer()
+let oiHistoryLoaded = false
+
+/**
+ * Au premier démarrage, on charge l'historique OI Binance (200 points 5m).
+ * Ensuite on ajoute juste les nouveaux snapshots au fil du temps.
+ */
+async function initOIBufferIfNeeded() {
+  if (oiHistoryLoaded) return
+  oiHistoryLoaded = true
+
+  if (oiSessionBuffer.length >= 10) return // déjà chargé depuis le disque
+
+  try {
+    const history = await fetchOIHistory('5m', 200)
+    if (history.length > 1) {
+      // Fusionner avec ce qu'on a déjà
+      const existing = new Set(oiSessionBuffer.map((p) => p.time))
+      for (const point of history) {
+        if (!existing.has(point.time)) {
+          oiSessionBuffer.push(point)
+        }
+      }
+      oiSessionBuffer.sort((a, b) => a.time - b.time)
+      while (oiSessionBuffer.length > MAX_OI_POINTS) oiSessionBuffer.shift()
+      saveOIBuffer(oiSessionBuffer)
+    }
+  } catch (err) {
+    console.error('[OI] Failed to load history:', err)
+  }
+}
 
 function pushOiSnapshot(snapshot: OIBar) {
   const last = oiSessionBuffer.at(-1)
@@ -126,7 +157,7 @@ function getMarketRegime(
   return 'range'
 }
 
-// ─── HTF BIAS (1h approximé sur 5m) ─────────────────────────────────────────
+// ─── HTF BIAS ────────────────────────────────────────────────────────────────
 
 function getHTFBias(
   klines: Array<{ close: number }>,
@@ -250,21 +281,12 @@ function detectLH(klines: Array<{ high: number }>): boolean {
 
 // ─── FILTRES ENTRY ───────────────────────────────────────────────────────────
 
-/**
- * Filtre funding rate extrême.
- * Funding > 0.05% → trop de levier long → éviter les longs.
- * Funding < -0.05% → trop de levier short → éviter les shorts.
- */
 function isFundingBlocked(fundingRate: number, action: 'BUY' | 'SELL'): boolean {
   if (action === 'BUY' && fundingRate > 0.0005) return true
   if (action === 'SELL' && fundingRate < -0.0005) return true
   return false
 }
 
-/**
- * Distance minimale entre prix et VWAP.
- * Si le prix est déjà > 0.3% de la VWAP → entrée trop tardive.
- */
 function isVwapDistanceValid(distancePct: number): boolean {
   return distancePct <= 0.3
 }
@@ -402,9 +424,12 @@ export async function GET(req: NextRequest) {
     : '5m'
 
   try {
+    // Charger l'historique OI au premier démarrage
+    await initOIBufferIfNeeded()
+
     const [klines, trades, oiSnapshot, ticker, funding] = await Promise.all([
       fetchKlines(safeTimeframe, 200),
-      fetchAggTrades(500),
+      fetchAggTrades(100),
       fetchCurrentOI(),
       fetchTicker(),
       fetchFundingRate(),
@@ -508,6 +533,7 @@ export async function GET(req: NextRequest) {
       cooldown,
       fundingBlocked,
       vwapDistanceOk,
+      oiBufferSize: oiSessionBuffer.length,
       currentPosition: getCurrentPosition(),
       setupHistory: getRecentSetups(),
       setupStats: getStats(),
@@ -526,6 +552,7 @@ export async function GET(req: NextRequest) {
         cooldown: false,
         fundingBlocked: false,
         vwapDistanceOk: true,
+        oiBufferSize: oiSessionBuffer.length,
         currentPosition: getCurrentPosition(),
         setupHistory: getRecentSetups(),
         setupStats: getStats(),
