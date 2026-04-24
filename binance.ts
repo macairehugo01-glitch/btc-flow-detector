@@ -103,7 +103,7 @@ export async function fetchAggTrades(limit: number): Promise<AggTrade[]> {
   let afterTradeId: string | null = null
 
   for (let i = 0; i < pages; i++) {
-    const url = afterTradeId
+    const url: string = afterTradeId
       ? `${OKX_BASE}/api/v5/market/trades?instId=BTC-USDT-SWAP&limit=${perPage}&after=${afterTradeId}`
       : `${OKX_BASE}/api/v5/market/trades?instId=BTC-USDT-SWAP&limit=${perPage}`
 
