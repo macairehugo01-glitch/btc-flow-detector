@@ -388,22 +388,24 @@ function computeSignal(args: {
       score += 1
       reasons.push(`L: Sweep HIGH mémorisé (il y a ${sweepAgeMin.toFixed(0)} min).`)
 
-      // F (1pt) : OI stagne/baisse depuis le sweep = positions débouclées
-      if (oiDone || oiLiquidated) {
+      // F (1pt) : OI expansion PENDANT le sweep (nouvelles positions = piège institutionnel)
+      const oiBeforeSweep = oiSessionBuffer.find(o => o.time < (currentSweep!.detectedAt / 1000) - 300)?.openInterest ?? 0
+      const oiExpandedDuringSweep = oiBeforeSweep > 0 && currentSweep.oiAtSweep > oiBeforeSweep * 1.0002
+      if (oiExpandedDuringSweep) {
         score += 1
-        reasons.push(oiLiquidated ? 'F: Chute OI = liquidations détectées.' : 'F: OI stagne depuis le sweep.')
+        reasons.push('F: OI ↑ pendant le sweep (piège institutionnel confirmé).')
       }
 
-      // F (1pt) : CVD baissier actuel (vendeurs agressifs)
-      if (cvdNonStable && lastCvd.delta < 0) {
+      // F (1pt) : CVD non-stable (agression détectée)
+      if (cvdNonStable) {
         score += 1
-        reasons.push('F: CVD baissier (vendeurs agressifs).')
+        reasons.push(lastCvd.delta < 0 ? 'F: CVD baissier (vendeurs agressifs).' : 'F: CVD non-stable (agression détectée).')
       }
 
-      // R (1pt) : rejet VWAP ou sous VWAP
-      if (vwapReject || belowVwap) {
+      // R (1pt) : rejet VWAP + OI stagne/baisse (divergence flux-prix = shorts débouclent)
+      if ((vwapReject || belowVwap) && (oiDone || oiLiquidated)) {
         score += 1
-        reasons.push('R: Rejet / acceptance sous VWAP.')
+        reasons.push('R: Rejet VWAP + OI stagne/↓ (divergence flux-prix confirmée).')
       }
 
       // R (1pt) : structure LH confirmée
@@ -435,24 +437,31 @@ function computeSignal(args: {
       let score = 0
       const reasons: string[] = []
 
+      // L (1pt) : sweep détecté et mémorisé
       score += 1
       reasons.push(`L: Sweep LOW mémorisé (il y a ${sweepAgeMin.toFixed(0)} min).`)
 
-      if (oiDone || oiLiquidated) {
+      // F (1pt) : OI expansion PENDANT le sweep (nouvelles positions = short squeeze potentiel)
+      const oiBeforeSweepL = oiSessionBuffer.find(o => o.time < (currentSweep!.detectedAt / 1000) - 300)?.openInterest ?? 0
+      const oiExpandedDuringSweepL = oiBeforeSweepL > 0 && currentSweep.oiAtSweep > oiBeforeSweepL * 1.0002
+      if (oiExpandedDuringSweepL) {
         score += 1
-        reasons.push(oiLiquidated ? 'F: Chute OI = liquidations détectées.' : 'F: OI stagne depuis le sweep.')
+        reasons.push('F: OI ↑ pendant le sweep (short squeeze potentiel confirmé).')
       }
 
-      if (cvdNonStable && lastCvd.delta > 0) {
+      // F (1pt) : CVD non-stable (agression détectée)
+      if (cvdNonStable) {
         score += 1
-        reasons.push('F: CVD haussier (acheteurs agressifs).')
+        reasons.push(lastCvd.delta > 0 ? 'F: CVD haussier (acheteurs agressifs).' : 'F: CVD non-stable (agression détectée).')
       }
 
-      if (vwapReclaim || aboveVwap) {
+      // R (1pt) : reclaim VWAP + OI stagne/baisse (shorts ferment)
+      if ((vwapReclaim || aboveVwap) && (oiDone || oiLiquidated)) {
         score += 1
-        reasons.push('R: Reclaim / acceptance au-dessus VWAP.')
+        reasons.push('R: Reclaim VWAP + OI stagne/↓ (shorts ferment, divergence confirmée).')
       }
 
+      // R (1pt) : structure HL confirmée
       if (hlStructure) {
         score += 1
         reasons.push('R: Structure HL confirmée.')
