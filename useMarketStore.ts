@@ -113,6 +113,7 @@ export type TradeSignal = {
   volatilityBucket: 'low' | 'medium' | 'high'
   reasons: string[]
   vwap: number
+  sweepAge?: number
   metrics: {
     priceVsVwapPct: number
     cvdDelta: number
@@ -188,7 +189,7 @@ export const useMarketStore = create<MarketStore>((set) => ({
 
   timeframe: '5m',
   isConnected: false,
-  isLoading: false,
+  isLoading: true, // ← true au démarrage pour bloquer le rendu avant le premier fetch
   error: null,
 
   thresholds: {
