@@ -1,5 +1,4 @@
 'use client'
-
 import { useMarketStore } from './useMarketStore'
 
 export default function OIStatsPanel() {
@@ -41,36 +40,33 @@ export default function OIStatsPanel() {
       >
         OI Stats Panel
       </div>
-
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div>Current OI: {latest ? latest.openInterest.toFixed(2) : '—'}</div>
-
+        <div>
+          Current OI: {latest ? latest.openInterest.toFixed(2) : '—'}
+        </div>
         <div
           style={{
             color: lastStep >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
           }}
         >
-          Last OI Step: {lastStep.toFixed(2)}
+          Last OI Step: {typeof lastStep === 'number' ? lastStep.toFixed(2) : '—'}
         </div>
-
         <div
           style={{
             color:
               sessionChange >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
           }}
         >
-          Session OI Change: {sessionChange.toFixed(2)}
+          Session OI Change: {typeof sessionChange === 'number' ? sessionChange.toFixed(2) : '—'}
         </div>
-
         <div
           style={{
             color:
               sessionChangePct >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
           }}
         >
-          Session OI %: {sessionChangePct.toFixed(4)}%
+          Session OI %: {typeof sessionChangePct === 'number' ? sessionChangePct.toFixed(4) : '—'}%
         </div>
-
         <div>
           Funding: {funding ? `${(funding.rate * 100).toFixed(4)}%` : '—'}
         </div>
