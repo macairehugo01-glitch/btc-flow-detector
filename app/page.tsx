@@ -1,5 +1,4 @@
 'use client'
-
 import { Header } from '../index'
 import StatsBar from '../StatsBar'
 import { CVDChart } from '../CVDChart'
@@ -17,12 +16,15 @@ import { useMarketStore } from '../useMarketStore'
 
 export default function Page() {
   const { refresh } = useMarketData()
-  const { error, isLoading } = useMarketStore()
+  const { error, isLoading, ticker, signal } = useMarketStore()
+
+  // Guard global : ne pas rendre les composants tant que les données
+  // essentielles ne sont pas chargées — évite les .toFixed() sur null
+  const isReady = !isLoading && ticker !== null && signal !== null
 
   return (
     <main style={{ minHeight: '100vh', background: 'var(--bg-primary)' }}>
       <Header onRefresh={refresh} />
-
       <div
         style={{
           maxWidth: 1400,
@@ -48,64 +50,66 @@ export default function Page() {
           </div>
         )}
 
-        {isLoading && (
+        {!isReady && (
           <div
             style={{
               fontSize: 12,
               fontFamily: 'monospace',
               color: 'var(--text-muted)',
+              textAlign: 'center',
+              padding: '40px 0',
             }}
           >
             Chargement des données marché...
           </div>
         )}
 
-        <StatsBar />
-
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'minmax(0,1fr) 320px',
-            gap: 16,
-            alignItems: 'start',
-          }}
-        >
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {isReady && (
+          <>
+            <StatsBar />
             <div
               style={{
                 display: 'grid',
-                gridTemplateColumns: '2fr 1fr',
+                gridTemplateColumns: 'minmax(0,1fr) 320px',
                 gap: 16,
-                alignItems: 'stretch',
+                alignItems: 'start',
               }}
             >
-              <PriceChart />
-              <EconomicCalendarPanel />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '2fr 1fr',
+                    gap: 16,
+                    alignItems: 'stretch',
+                  }}
+                >
+                  <PriceChart />
+                  <EconomicCalendarPanel />
+                </div>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 1fr',
+                    gap: 16,
+                  }}
+                >
+                  <OIChart />
+                  <CVDChart />
+                </div>
+                <SetupHistory />
+                <AnalyticsPanel />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <MacroPanel />
+                <TradeSignalPanel />
+                <OIStatsPanel />
+                <ConditionsChecklist />
+                <SettingsPanel />
+              </div>
             </div>
-
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr 1fr',
-                gap: 16,
-              }}
-            >
-              <OIChart />
-              <CVDChart />
-            </div>
-
-            <SetupHistory />
-            <AnalyticsPanel />
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <MacroPanel />
-            <TradeSignalPanel />
-            <OIStatsPanel />
-            <ConditionsChecklist />
-            <SettingsPanel />
-          </div>
-        </div>
+          </>
+        )}
       </div>
     </main>
   )
