@@ -112,6 +112,7 @@ export type TradeSignal = {
   marketRegime: 'trend' | 'range' | 'breakout' | 'reversal'
   volatilityBucket: 'low' | 'medium' | 'high'
   reasons: string[]
+  vwap: number
   metrics: {
     priceVsVwapPct: number
     cvdDelta: number
