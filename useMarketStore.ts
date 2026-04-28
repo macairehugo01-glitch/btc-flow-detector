@@ -189,7 +189,7 @@ export const useMarketStore = create<MarketStore>((set) => ({
 
   timeframe: '5m',
   isConnected: false,
-  isLoading: true, // ← true au démarrage pour bloquer le rendu avant le premier fetch
+  isLoading: true,
   error: null,
 
   thresholds: {
@@ -208,6 +208,11 @@ export const useMarketStore = create<MarketStore>((set) => ({
     set((state) => ({
       ...state,
       ...data,
+      // Garder les anciennes valeurs si les nouvelles sont null
+      // évite les crashes entre deux fetches du setInterval
+      ticker: data.ticker ?? state.ticker,
+      signal: data.signal ?? state.signal,
+      funding: data.funding ?? state.funding,
     })),
   setError: (error) => set({ error }),
   setLoading: (isLoading) => set({ isLoading }),
