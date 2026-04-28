@@ -235,8 +235,8 @@ function detectAndUpdateSweep(
   const allClosed = klines.slice(0, -1) // toutes les bougies fermées
   if (allClosed.length < 20) return
 
-  const recentKlines = allClosed.slice(-10)        // 10 bougies à scanner
-  const structureKlines = allClosed.slice(-50, -10) // structure = les 40 bougies avant
+  const recentKlines = allClosed.slice(-30)         // 30 bougies à scanner (2h30 sur 5m)
+  const structureKlines = allClosed.slice(-80, -30) // structure = les 50 bougies avant
 
   if (structureKlines.length < 5) return
 
@@ -245,7 +245,7 @@ function detectAndUpdateSweep(
 
   for (let i = recentKlines.length - 1; i >= 0; i--) {
     const candle = recentKlines[i]
-    const candleIndex = klines.length - 1 - 10 + i // index dans klines complètes
+    const candleIndex = klines.length - 1 - 30 + i // index dans klines complètes
 
     // Sweep haussier (piège → signal SELL futur)
     const isHighSweep = candle.high > structureHigh && candle.close < structureHigh
