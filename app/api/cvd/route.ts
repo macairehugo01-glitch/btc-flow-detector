@@ -257,7 +257,7 @@ function detectAndUpdateSweep(
     const volMultHigh = avgVolHigh > 0 ? klines[candleIndex].volume / avgVolHigh : 1
     if (isHighSweep && hasSweepWickQuality(candle, 'high', volMultHigh) && hasSweepVolume(klines, candleIndex)) {
       // Ignorer les sweeps trop vieux (> TTL)
-      if (Date.now() - candle.time * 1000 > SWEEP_TTL_MS) { i--; continue }
+      if (Date.now() - candle.time * 1000 > SWEEP_TTL_MS) { continue }
       // Vérifier que ce sweep est plus récent que l'actuel
       if (!currentSweep || candle.time * 1000 > currentSweep.detectedAt) {
         const oiAtSweep = oi.find(o => o.time <= candle.time)?.openInterest ?? 0
@@ -283,7 +283,7 @@ function detectAndUpdateSweep(
     const volMultLow = avgVolLow > 0 ? klines[candleIndex].volume / avgVolLow : 1
     if (isLowSweep && hasSweepWickQuality(candle, 'low', volMultLow) && hasSweepVolume(klines, candleIndex)) {
       // Ignorer les sweeps trop vieux (> TTL)
-      if (Date.now() - candle.time * 1000 > SWEEP_TTL_MS) { i--; continue }
+      if (Date.now() - candle.time * 1000 > SWEEP_TTL_MS) { continue }
       if (!currentSweep || candle.time * 1000 > currentSweep.detectedAt) {
         const oiAtSweep = oi.find(o => o.time <= candle.time)?.openInterest ?? 0
         const cvdAtSweep = cvd[Math.min(candleIndex, cvd.length - 1)]?.cvd ?? 0
