@@ -180,18 +180,34 @@ function getHTFBias(
 
 // ─── PHASE 1 : DÉTECTION SWEEP (L + F) ───────────────────────────────────────
 
+function getAvgVolume(
+  klines: Array<{ volume: number }>,
+  sweepIndex: number
+): number {
+  const lookback = klines.slice(Math.max(0, sweepIndex - 20), sweepIndex)
+  if (lookback.length < 5) return 0
+  return lookback.reduce((s, k) => s + k.volume, 0) / lookback.length
+}
+
 function hasSweepWickQuality(
   candle: { open: number; high: number; low: number; close: number },
-  direction: 'high' | 'low'
+  direction: 'high' | 'low',
+  volumeMultiplier: number = 1 // ratio volume/moyenne pour adapter le seuil wick
 ): boolean {
   const totalSize = candle.high - candle.low
   if (totalSize === 0) return false
+
+  // Seuil wick adaptatif :
+  // - Volume normal (1-3x) → seuil strict 60%
+  // - Volume extrême (>3x) → seuil assoupli 30% car le volume lui-même confirme l'événement
+  const wickThreshold = volumeMultiplier >= 3 ? 0.3 : 0.6
+
   if (direction === 'high') {
     const upperWick = candle.high - Math.max(candle.open, candle.close)
-    return upperWick / totalSize > 0.6
+    return upperWick / totalSize > wickThreshold
   } else {
     const lowerWick = Math.min(candle.open, candle.close) - candle.low
-    return lowerWick / totalSize > 0.6
+    return lowerWick / totalSize > wickThreshold
   }
 }
 
@@ -199,10 +215,9 @@ function hasSweepVolume(
   klines: Array<{ volume: number }>,
   sweepIndex: number
 ): boolean {
-  const lookback = klines.slice(Math.max(0, sweepIndex - 20), sweepIndex)
-  if (lookback.length < 5) return true
-  const avgVolume = lookback.reduce((s, k) => s + k.volume, 0) / lookback.length
-  return klines[sweepIndex].volume > avgVolume * 1.5
+  const avg = getAvgVolume(klines, sweepIndex)
+  if (avg === 0) return true
+  return klines[sweepIndex].volume > avg * 1.5
 }
 
 /**
@@ -232,7 +247,9 @@ function detectAndUpdateSweep(
 
     // Sweep haussier (piège → signal SELL futur)
     const isHighSweep = candle.high > structureHigh && candle.close < structureHigh
-    if (isHighSweep && hasSweepWickQuality(candle, 'high') && hasSweepVolume(klines, candleIndex)) {
+    const avgVolHigh = getAvgVolume(klines, candleIndex)
+    const volMultHigh = avgVolHigh > 0 ? klines[candleIndex].volume / avgVolHigh : 1
+    if (isHighSweep && hasSweepWickQuality(candle, 'high', volMultHigh) && hasSweepVolume(klines, candleIndex)) {
       // Vérifier que ce sweep est plus récent que l'actuel
       if (!currentSweep || candle.time * 1000 > currentSweep.detectedAt) {
         const oiAtSweep = oi.find(o => o.time <= candle.time)?.openInterest ?? 0
@@ -254,7 +271,9 @@ function detectAndUpdateSweep(
 
     // Sweep baissier (piège → signal BUY futur)
     const isLowSweep = candle.low < structureLow && candle.close > structureLow
-    if (isLowSweep && hasSweepWickQuality(candle, 'low') && hasSweepVolume(klines, candleIndex)) {
+    const avgVolLow = getAvgVolume(klines, candleIndex)
+    const volMultLow = avgVolLow > 0 ? klines[candleIndex].volume / avgVolLow : 1
+    if (isLowSweep && hasSweepWickQuality(candle, 'low', volMultLow) && hasSweepVolume(klines, candleIndex)) {
       if (!currentSweep || candle.time * 1000 > currentSweep.detectedAt) {
         const oiAtSweep = oi.find(o => o.time <= candle.time)?.openInterest ?? 0
         const cvdAtSweep = cvd[Math.min(candleIndex, cvd.length - 1)]?.cvd ?? 0
