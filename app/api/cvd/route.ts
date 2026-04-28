@@ -515,10 +515,14 @@ function computeSignal(args: {
     }
   }
 
+  const fallbackReason = currentSweep
+    ? [`Sweep ${currentSweep.direction.toUpperCase()} actif (${Math.round((Date.now() - currentSweep.detectedAt) / 60000)}min) — en attente de réaction VWAP.`]
+    : ['Aucun sweep actif en mémoire.']
+
   return {
     action: 'STABLE', confidence: 1, signalType: 'neutral',
     marketRegime, volatilityBucket, vwap: currentVwap,
-    reasons: ['Aucun sweep actif en mémoire.'],
+    reasons: fallbackReason,
     metrics,
   }
 }
