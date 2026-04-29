@@ -68,10 +68,10 @@ function Table({
               >
                 <td style={{ padding: '8px 12px 8px 0' }}>{r.label}</td>
                 <td style={{ paddingRight: 12 }}>{r.trades}</td>
-                <td style={{ paddingRight: 12 }}>{r.winrate.toFixed(1)}%</td>
-                <td style={{ paddingRight: 12 }}>{r.rTotal.toFixed(2)}</td>
-                <td style={{ paddingRight: 12 }}>{r.expectancy.toFixed(3)}</td>
-                <td style={{ paddingRight: 12 }}>{r.profitFactor.toFixed(2)}</td>
+                <td style={{ paddingRight: 12 }}>{(r.winrate ?? 0).toFixed(1)}%</td>
+                <td style={{ paddingRight: 12 }}>{(r.rTotal ?? 0).toFixed(2)}</td>
+                <td style={{ paddingRight: 12 }}>{(r.expectancy ?? 0).toFixed(3)}</td>
+                <td style={{ paddingRight: 12 }}>{(r.profitFactor ?? 0).toFixed(2)}</td>
               </tr>
             ))}
           </tbody>
@@ -166,11 +166,11 @@ export default function AnalyticsPanel() {
       >
         {[
           ['Trades', overview.trades],
-          ['WR', `${overview.winrate.toFixed(1)}%`],
-          ['R Total', overview.rTotal.toFixed(2)],
-          ['Expectancy', overview.expectancy.toFixed(3)],
-          ['PF', overview.profitFactor.toFixed(2)],
-          ['Avg DD', overview.avgDrawdownR.toFixed(2)],
+          ['WR', `${(overview.winrate ?? 0).toFixed(1)}%`],
+          ['R Total', (overview.rTotal ?? 0).toFixed(2)],
+          ['Expectancy', (overview.expectancy ?? 0).toFixed(3)],
+          ['PF', (overview.profitFactor ?? 0).toFixed(2)],
+          ['Avg DD', (overview.avgDrawdownR ?? 0).toFixed(2)],
         ].map(([label, value]) => (
           <div
             key={label}
@@ -270,8 +270,8 @@ export default function AnalyticsPanel() {
           <div
             style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}
           >
-            <div>Max DD: {analytics.drawdown.maxDrawdownR.toFixed(2)}R</div>
-            <div>Current DD: {analytics.drawdown.currentDrawdownR.toFixed(2)}R</div>
+            <div>Max DD: {(analytics.drawdown.maxDrawdownR ?? 0).toFixed(2)}R</div>
+            <div>Current DD: {(analytics.drawdown.currentDrawdownR ?? 0).toFixed(2)}R</div>
           </div>
         </div>
       </div>
