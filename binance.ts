@@ -59,15 +59,6 @@ function mapTimeframeToBybit(tf: string): string {
   }
 }
 
-/**
- * Klines Bybit Linear (USDT Perpetual).
- * Bybit retourne les klines du plus récent au plus ancien → on reverse.
- * Colonnes : [startTime, open, high, low, close, volume, turnover]
- *
- * Pour le takerBuyVolume, on utilise une seconde requête sur
- * /v5/market/kline avec category=linear qui inclut les données taker.
- * Si non disponible, on fallback sur la direction de la bougie.
- */
 export async function fetchKlines(timeframe: string, limit: number): Promise<Kline[]> {
   const interval = mapTimeframeToBybit(timeframe)
 
@@ -87,17 +78,12 @@ export async function fetchKlines(timeframe: string, limit: number): Promise<Kli
     throw new Error(`Bybit klines error: ${data.retMsg}`)
   }
 
-  // Bybit du plus récent au plus ancien → reverse
   const klines = [...data.result.list].reverse().map((k) => {
     const open = Number(k[1])
     const high = Number(k[2])
     const low = Number(k[3])
     const close = Number(k[4])
     const volume = Number(k[5])
-
-    // Bybit ne fournit pas takerBuyVolume dans les klines standard
-    // On estime via la direction de la bougie comme fallback
-    // (sera remplacé par le vrai calcul si disponible)
     const takerBuyVolume = close >= open ? volume * 0.6 : volume * 0.4
 
     return {
@@ -111,14 +97,9 @@ export async function fetchKlines(timeframe: string, limit: number): Promise<Kli
     }
   })
 
-  // Récupérer les vrais takerBuyVolume via l'endpoint premium si dispo
-  // Sinon on utilise l'estimation ci-dessus
   return klines
 }
 
-/**
- * Trades récents Bybit — pour compatibilité avec l'ancien code.
- */
 export async function fetchAggTrades(_limit: number): Promise<AggTrade[]> {
   try {
     const data = await httpJson<{
@@ -154,7 +135,8 @@ export async function fetchAggTrades(_limit: number): Promise<AggTrade[]> {
 }
 
 /**
- * OI snapshot actuel Bybit.
+ * OI snapshot actuel — utilise limit=1 sur la liste pour avoir le dernier point.
+ * L'API Bybit retourne une liste même avec limit=1.
  */
 export async function fetchCurrentOI(): Promise<OIBar> {
   const data = await httpJson<{
@@ -162,25 +144,29 @@ export async function fetchCurrentOI(): Promise<OIBar> {
     retMsg: string
     result: {
       symbol: string
-      openInterest: string
-      timestamp: string
+      category: string
+      list: {
+        openInterest: string
+        timestamp: string
+      }[]
     }
   }>(
     `${BYBIT}/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=5min&limit=1`
   )
 
-  if (data.retCode !== 0) {
+  if (data.retCode !== 0 || !data.result?.list?.length) {
     throw new Error(`Bybit OI error: ${data.retMsg}`)
   }
 
+  const item = data.result.list[0]
   return {
-    time: Math.floor(Number(data.result.timestamp) / 1000),
-    openInterest: Number(data.result.openInterest),
+    time: Math.floor(Number(item.timestamp) / 1000),
+    openInterest: Number(item.openInterest),
   }
 }
 
 /**
- * Historique OI Bybit — jusqu'à 200 points, gratuit sans auth.
+ * Historique OI Bybit — jusqu'à 200 points.
  * intervalTime : 5min, 15min, 30min, 1h, 4h, 1d
  */
 export async function fetchOIHistory(period: string = '5min', limit: number = 200): Promise<OIBar[]> {
@@ -245,7 +231,6 @@ export async function fetchTicker(): Promise<TickerData> {
       volume24h: Number(item.volume24h),
     }
   } catch {
-    // Fallback CoinGecko
     const cg = await httpJson<
       Record<string, { usd: number; usd_24h_change: number; usd_24h_vol: number }>
     >(
