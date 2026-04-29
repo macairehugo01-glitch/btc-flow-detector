@@ -66,12 +66,20 @@ const MAX_OI_POINTS = 500
 let oiSessionBuffer: OIBar[] = loadOIBuffer()
 let oiHistoryLoaded = false
 
-async function initOIBufferIfNeeded() {
-  if (oiHistoryLoaded) return
+async function initOIBufferIfNeeded(timeframe: string = '5m') {
+  if (oiHistoryLoaded && oiSessionBuffer.length >= 10) return
   oiHistoryLoaded = true
-  if (oiSessionBuffer.length >= 10) return
+
+  const intervalMap: Record<string, string> = {
+    '1m': '5min',
+    '5m': '5min',
+    '15m': '15min',
+    '1h': '1h',
+  }
+  const period = intervalMap[timeframe] ?? '5min'
+
   try {
-    const history = await fetchOIHistory('5min', 200)
+    const history = await fetchOIHistory(period, 200)
     if (history.length > 1) {
       const existing = new Set(oiSessionBuffer.map((p) => p.time))
       for (const point of history) {
@@ -80,9 +88,11 @@ async function initOIBufferIfNeeded() {
       oiSessionBuffer.sort((a, b) => a.time - b.time)
       while (oiSessionBuffer.length > MAX_OI_POINTS) oiSessionBuffer.shift()
       saveOIBuffer(oiSessionBuffer)
+      console.log(`[OI] Buffer initialisé: ${oiSessionBuffer.length} points (${period})`)
     }
   } catch (err) {
     console.error('[OI] Failed to load history:', err)
+    oiHistoryLoaded = false // permettre un retry au prochain appel
   }
 }
 
@@ -352,8 +362,15 @@ function isFundingBlocked(fundingRate: number, action: 'BUY' | 'SELL'): boolean 
   return false
 }
 
-function isVwapDistanceValid(distancePct: number): boolean {
-  return distancePct <= 0.3
+function isVwapDistanceValid(distancePct: number, timeframe: string = '5m'): boolean {
+  const thresholds: Record<string, number> = {
+    '1m': 0.3,
+    '5m': 0.5,
+    '15m': 0.7,
+    '1h': 1.0,
+  }
+  const max = thresholds[timeframe] ?? 0.5
+  return distancePct <= max
 }
 
 // ─── COMPUTE SIGNAL (3 phases) ────────────────────────────────────────────────
@@ -536,7 +553,7 @@ export async function GET(req: NextRequest) {
   const safeTimeframe: Timeframe = ['1m', '5m', '15m', '1h'].includes(timeframe) ? timeframe : '5m'
 
   try {
-    await initOIBufferIfNeeded()
+    await initOIBufferIfNeeded(safeTimeframe)
 
     const [klines, trades, oiSnapshot, ticker, funding] = await Promise.all([
       fetchKlines(safeTimeframe, 200),
@@ -573,7 +590,7 @@ export async function GET(req: NextRequest) {
     const fundingBlocked = signal.action !== 'STABLE'
       ? isFundingBlocked(signal.metrics.fundingRate, signal.action as 'BUY' | 'SELL')
       : false
-    const vwapDistanceOk = isVwapDistanceValid(signal.metrics.distanceFromVwapPct)
+    const vwapDistanceOk = isVwapDistanceValid(signal.metrics.distanceFromVwapPct, safeTimeframe)
 
     const canTrade = !weekend && !cooldown && !fundingBlocked && vwapDistanceOk && signal.action !== 'STABLE'
 
