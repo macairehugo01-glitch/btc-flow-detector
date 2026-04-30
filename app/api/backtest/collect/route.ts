@@ -6,7 +6,6 @@ export const dynamic = 'force-dynamic'
 
 const BYBIT = 'https://api.bybit.com'
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '/data'
-const TARGET_BARS = 70080
 const BARS_PER_CALL = 200
 
 type RawBar = {
@@ -22,32 +21,36 @@ type RawBar = {
 
 type KlineRaw = Omit<RawBar, 'oi' | 'fundingRate'>
 
-function getHistoryFile(symbol: string): string {
-  return path.join(DATA_DIR, `backtest-history-${symbol.toLowerCase()}.json`)
+// ─── CONFIG PAR TIMEFRAME ─────────────────────────────────────────────────────
+
+const TF_CONFIG: Record<string, { interval: string; oiInterval: string; targetBars: number; label: string }> = {
+  '1h':  { interval: '60',  oiInterval: '1h',    targetBars: 17520, label: '1h'  },
+  '15m': { interval: '15',  oiInterval: '15min', targetBars: 70080, label: '15m' },
+  '4h':  { interval: '240', oiInterval: '4h',    targetBars: 4380,  label: '4h'  },
+}
+
+function getHistoryFile(symbol: string, tf: string): string {
+  return path.join(DATA_DIR, `backtest-history-${symbol.toLowerCase()}-${tf}.json`)
 }
 
 // ─── KLINES paginées ──────────────────────────────────────────────────────────
 
-async function fetchKlinesPaginated(symbol: string): Promise<KlineRaw[]> {
+async function fetchKlinesPaginated(symbol: string, interval: string, targetBars: number): Promise<KlineRaw[]> {
   const allBars: KlineRaw[] = []
   let endTime = Date.now()
-  const maxCalls = Math.ceil(TARGET_BARS / BARS_PER_CALL)
+  const maxCalls = Math.ceil(targetBars / BARS_PER_CALL)
   let callCount = 0
 
-  while (allBars.length < TARGET_BARS && callCount < maxCalls) {
-    const url = `${BYBIT}/v5/market/kline?category=linear&symbol=${symbol}&interval=15&limit=${BARS_PER_CALL}&end=${endTime}`
+  while (allBars.length < targetBars && callCount < maxCalls) {
+    const url = `${BYBIT}/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${BARS_PER_CALL}&end=${endTime}`
     const res = await fetch(url, { cache: 'no-store' })
     const data = await res.json()
-
     if (data.retCode !== 0 || !data.result?.list?.length) break
 
     const bars: KlineRaw[] = [...data.result.list].reverse().map((k: string[]) => ({
       time: Math.floor(Number(k[0]) / 1000),
-      open: Number(k[1]),
-      high: Number(k[2]),
-      low: Number(k[3]),
-      close: Number(k[4]),
-      volume: Number(k[5]),
+      open: Number(k[1]), high: Number(k[2]),
+      low: Number(k[3]), close: Number(k[4]), volume: Number(k[5]),
     }))
 
     allBars.unshift(...bars)
@@ -55,26 +58,26 @@ async function fetchKlinesPaginated(symbol: string): Promise<KlineRaw[]> {
     if (!oldest) break
     endTime = oldest.time * 1000 - 1
     callCount++
-    await new Promise(r => setTimeout(r, 300))
+    await new Promise(r => setTimeout(r, 250))
   }
 
   const seen = new Set<number>()
   return allBars
     .filter(b => { if (seen.has(b.time)) return false; seen.add(b.time); return true })
     .sort((a, b) => a.time - b.time)
-    .slice(-TARGET_BARS)
+    .slice(-targetBars)
 }
 
 // ─── OI paginé ───────────────────────────────────────────────────────────────
 
-async function fetchOIPaginated(symbol: string): Promise<{ time: number; oi: number }[]> {
+async function fetchOIPaginated(symbol: string, oiInterval: string, targetBars: number): Promise<{ time: number; oi: number }[]> {
   const allOI: { time: number; oi: number }[] = []
   let endTime = Date.now()
-  const maxCalls = Math.ceil(TARGET_BARS / BARS_PER_CALL)
+  const maxCalls = Math.ceil(targetBars / BARS_PER_CALL)
   let callCount = 0
 
-  while (allOI.length < TARGET_BARS && callCount < maxCalls) {
-    const url = `${BYBIT}/v5/market/open-interest?category=linear&symbol=${symbol}&intervalTime=15min&limit=${BARS_PER_CALL}&endTime=${endTime}`
+  while (allOI.length < targetBars && callCount < maxCalls) {
+    const url = `${BYBIT}/v5/market/open-interest?category=linear&symbol=${symbol}&intervalTime=${oiInterval}&limit=${BARS_PER_CALL}&endTime=${endTime}`
     try {
       const res = await fetch(url, { cache: 'no-store' })
       const data = await res.json()
@@ -90,7 +93,7 @@ async function fetchOIPaginated(symbol: string): Promise<{ time: number; oi: num
       if (!oldest) break
       endTime = oldest.time * 1000 - 1
       callCount++
-      await new Promise(r => setTimeout(r, 300))
+      await new Promise(r => setTimeout(r, 250))
     } catch { break }
   }
 
@@ -124,7 +127,7 @@ async function fetchFundingPaginated(symbol: string): Promise<{ time: number; ra
       if (!oldest) break
       endTime = oldest.time * 1000 - 1
       callCount++
-      await new Promise(r => setTimeout(r, 300))
+      await new Promise(r => setTimeout(r, 250))
     } catch { break }
   }
 
@@ -136,22 +139,12 @@ async function fetchFundingPaginated(symbol: string): Promise<{ time: number; ra
 
 // ─── MERGE ────────────────────────────────────────────────────────────────────
 
-function mergeData(
-  klines: KlineRaw[],
-  oiData: { time: number; oi: number }[],
-  fundingData: { time: number; rate: number }[]
-): RawBar[] {
+function mergeData(klines: KlineRaw[], oiData: { time: number; oi: number }[], fundingData: { time: number; rate: number }[]): RawBar[] {
   return klines.map((k) => {
     let oi = 0
-    for (const o of oiData) {
-      if (o.time <= k.time) oi = o.oi
-      else break
-    }
+    for (const o of oiData) { if (o.time <= k.time) oi = o.oi; else break }
     let fundingRate = 0
-    for (const f of fundingData) {
-      if (f.time <= k.time) fundingRate = f.rate
-      else break
-    }
+    for (const f of fundingData) { if (f.time <= k.time) fundingRate = f.rate; else break }
     return { ...k, oi, fundingRate }
   })
 }
@@ -162,25 +155,31 @@ export async function GET(req: Request) {
   const url = new URL(req.url)
   const force = url.searchParams.get('force') === 'true'
   const symbol = (url.searchParams.get('symbol') ?? 'BTCUSDT').toUpperCase()
+  const tf = url.searchParams.get('tf') ?? '1h'
 
-  // Valider le symbole
-  const allowed = ['BTCUSDT', 'ETHUSDT']
-  if (!allowed.includes(symbol)) {
-    return NextResponse.json({ error: `Symbole non supporté: ${symbol}. Utilise BTCUSDT ou ETHUSDT` }, { status: 400 })
+  // Validation
+  const allowedSymbols = ['BTCUSDT', 'ETHUSDT']
+  if (!allowedSymbols.includes(symbol)) {
+    return NextResponse.json({ error: `Symbole non supporté: ${symbol}` }, { status: 400 })
   }
 
-  const HISTORY_FILE = getHistoryFile(symbol)
+  const config = TF_CONFIG[tf]
+  if (!config) {
+    return NextResponse.json({ error: `Timeframe non supporté: ${tf}. Utilise 1h, 15m ou 4h` }, { status: 400 })
+  }
+
+  const HISTORY_FILE = getHistoryFile(symbol, tf)
 
   try {
-    // Cache 24h par symbole
+    // Cache 24h
     if (!force && fs.existsSync(HISTORY_FILE)) {
       const stat = fs.statSync(HISTORY_FILE)
       const ageHours = (Date.now() - stat.mtimeMs) / 1000 / 3600
       if (ageHours < 24) {
         const existing = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8')) as RawBar[]
         return NextResponse.json({
-          message: `Données ${symbol} déjà à jour (cache 24h)`,
-          symbol,
+          message: `${symbol} ${tf} déjà à jour (cache 24h)`,
+          symbol, tf,
           bars: existing.length,
           from: new Date((existing[0]?.time ?? 0) * 1000).toISOString(),
           to: new Date((existing[existing.length - 1]?.time ?? 0) * 1000).toISOString(),
@@ -189,10 +188,12 @@ export async function GET(req: Request) {
       }
     }
 
-    console.log(`[BACKTEST] Collecte 2 ans 1h pour ${symbol}...`)
+    console.log(`[BACKTEST] Collecte ${symbol} ${tf} (${config.targetBars} bougies)...`)
 
-    const klines = await fetchKlinesPaginated(symbol)
-    const oiData = await fetchOIPaginated(symbol)
+    const klines = await fetchKlinesPaginated(symbol, config.interval, config.targetBars)
+    console.log(`[BACKTEST] Klines ${symbol} ${tf}: ${klines.length}`)
+
+    const oiData = await fetchOIPaginated(symbol, config.oiInterval, config.targetBars)
     const fundingData = await fetchFundingPaginated(symbol)
     const merged = mergeData(klines, oiData, fundingData)
 
@@ -200,8 +201,8 @@ export async function GET(req: Request) {
     fs.writeFileSync(HISTORY_FILE, JSON.stringify(merged, null, 2), 'utf-8')
 
     return NextResponse.json({
-      message: `${merged.length} bougies 15m ${symbol} collectées`,
-      symbol,
+      message: `${merged.length} bougies ${symbol} ${tf} collectées`,
+      symbol, tf,
       bars: merged.length,
       from: new Date((merged[0]?.time ?? 0) * 1000).toISOString(),
       to: new Date((merged[merged.length - 1]?.time ?? 0) * 1000).toISOString(),
