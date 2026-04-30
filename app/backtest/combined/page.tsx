@@ -265,4 +265,3 @@ export default function BacktestCombinedPage() {
     </main>
   )
 }
-}
