@@ -1,25 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server'
 import {
   fetchKlines,
-  fetchAggTrades,
   fetchCurrentOI,
   fetchOIHistory,
   fetchTicker,
   fetchFundingRate,
 } from '../../../binance'
 import { calculateVWAP, calculateCVD } from '../../../indicators'
-import type { Timeframe } from '../../../useMarketStore'
 import {
   evaluateOpenSetups,
   getRecentSetups,
   getStats,
+  getSlotStats,
   getSessionStats,
   getCurrentPosition,
-  getLastReverseBarKey,
+  getAllPositions,
   hasRecentDuplicate,
   isInCooldown,
   openPosition,
-  reversePosition,
+  closePosition,
+  type SlotKey,
 } from '../../../store'
 import {
   loadOIBuffer,
@@ -31,134 +31,83 @@ import {
 
 export const dynamic = 'force-dynamic'
 
-type OIBar = {
-  time: number
-  openInterest: number
+// ─── CONFIG DES 4 SLOTS ───────────────────────────────────────────────────────
+
+type SlotConfig = {
+  slot: SlotKey
+  symbol: string
+  timeframe: '1h' | '15m'
+  bybitInterval: string
+  oiInterval: string
+  vwapDistanceMax: number  // 0.3% validé par backtest
 }
 
-type SignalPayload = {
-  action: 'BUY' | 'SELL' | 'STABLE'
-  confidence: number
-  signalType:
-    | 'continuation_long'
-    | 'continuation_short'
-    | 'breakout'
-    | 'bullish_retest'
-    | 'bearish_retest'
-    | 'neutral'
-  marketRegime: 'trend' | 'range' | 'breakout' | 'reversal'
-  volatilityBucket: 'low' | 'medium' | 'high'
-  reasons: string[]
-  vwap: number
-  sweepAge?: number // minutes depuis le sweep
-  metrics: {
-    priceVsVwapPct: number
-    cvdDelta: number
-    oiDeltaPct: number
-    fundingRate: number
-    oiChangeAbs: number
-    distanceFromVwapPct: number
-  }
-}
+const SLOT_CONFIGS: SlotConfig[] = [
+  { slot: 'BTC-1h',  symbol: 'BTCUSDT', timeframe: '1h',  bybitInterval: '60', oiInterval: '1h',    vwapDistanceMax: 0.3 },
+  { slot: 'ETH-1h',  symbol: 'ETHUSDT', timeframe: '1h',  bybitInterval: '60', oiInterval: '1h',    vwapDistanceMax: 0.3 },
+  { slot: 'BTC-15m', symbol: 'BTCUSDT', timeframe: '15m', bybitInterval: '15', oiInterval: '15min', vwapDistanceMax: 0.5 },
+  { slot: 'ETH-15m', symbol: 'ETHUSDT', timeframe: '15m', bybitInterval: '15', oiInterval: '15min', vwapDistanceMax: 0.5 },
+]
 
-// ─── OI BUFFER ───────────────────────────────────────────────────────────────
+// ─── OI BUFFERS (un par slot) ─────────────────────────────────────────────────
+
+type OIBar = { time: number; openInterest: number }
+
 const MAX_OI_POINTS = 500
-let oiSessionBuffer: OIBar[] = loadOIBuffer()
-let oiHistoryLoaded = false
-
-async function initOIBufferIfNeeded(timeframe: string = '5m') {
-  if (oiHistoryLoaded && oiSessionBuffer.length >= 10) return
-  oiHistoryLoaded = true
-
-  const intervalMap: Record<string, string> = {
-    '1m': '5min',
-    '5m': '5min',
-    '15m': '15min',
-    '1h': '1h',
-  }
-  const period = intervalMap[timeframe] ?? '5min'
-
-  try {
-    const history = await fetchOIHistory(period, 200)
-    if (history.length > 1) {
-      const existing = new Set(oiSessionBuffer.map((p) => p.time))
-      for (const point of history) {
-        if (!existing.has(point.time)) oiSessionBuffer.push(point)
-      }
-      oiSessionBuffer.sort((a, b) => a.time - b.time)
-      while (oiSessionBuffer.length > MAX_OI_POINTS) oiSessionBuffer.shift()
-      saveOIBuffer(oiSessionBuffer)
-      console.log(`[OI] Buffer initialisé: ${oiSessionBuffer.length} points (${period})`)
-    }
-  } catch (err) {
-    console.error('[OI] Failed to load history:', err)
-    oiHistoryLoaded = false // permettre un retry au prochain appel
-  }
+const oiBuffers: Record<SlotKey, OIBar[]> = {
+  'BTC-1h':  loadOIBuffer('BTC-1h'),
+  'ETH-1h':  loadOIBuffer('ETH-1h'),
+  'BTC-15m': loadOIBuffer('BTC-15m'),
+  'ETH-15m': loadOIBuffer('ETH-15m'),
+}
+const oiHistoryLoaded: Record<SlotKey, boolean> = {
+  'BTC-1h': false, 'ETH-1h': false, 'BTC-15m': false, 'ETH-15m': false,
 }
 
-function pushOiSnapshot(snapshot: OIBar) {
-  const last = oiSessionBuffer.at(-1)
-  if (!last) { oiSessionBuffer.push(snapshot); saveOIBuffer(oiSessionBuffer); return }
-  if (snapshot.time !== last.time || snapshot.openInterest !== last.openInterest) {
-    oiSessionBuffer.push(snapshot)
-    while (oiSessionBuffer.length > MAX_OI_POINTS) oiSessionBuffer.shift()
-    saveOIBuffer(oiSessionBuffer)
-  }
+// ─── SWEEP STATES (un par slot) ───────────────────────────────────────────────
+
+const sweepStates: Record<SlotKey, SweepState> = {
+  'BTC-1h':  loadSweepState('BTC-1h'),
+  'ETH-1h':  loadSweepState('ETH-1h'),
+  'BTC-15m': loadSweepState('BTC-15m'),
+  'ETH-15m': loadSweepState('ETH-15m'),
 }
 
-function buildOiSeriesForKlines(klines: Array<{ time: number }>): OIBar[] {
-  if (!klines.length || !oiSessionBuffer.length) return []
-  return klines.map((k) => {
-    let matched = oiSessionBuffer[0]
-    for (const point of oiSessionBuffer) {
-      if (point.time <= k.time) matched = point
-      else break
-    }
-    return { time: k.time, openInterest: matched.openInterest }
-  })
-}
+const SWEEP_TTL_MS = 2 * 60 * 60 * 1000 // 2h — validé par backtest (fresh = 0-2 bougies 1h)
 
-// ─── SWEEP STATE (persisté 6h) ────────────────────────────────────────────────
-let currentSweep: SweepState = loadSweepState()
-const SWEEP_TTL_MS = 6 * 60 * 60 * 1000
-
-function isSweepValid(): boolean {
-  if (!currentSweep) return false
-  if (Date.now() - currentSweep.detectedAt > SWEEP_TTL_MS) {
-    currentSweep = null
-    saveSweepState(null)
+function isSweepValid(slot: SlotKey): boolean {
+  const sweep = sweepStates[slot]
+  if (!sweep) return false
+  if (Date.now() - sweep.detectedAt > SWEEP_TTL_MS) {
+    sweepStates[slot] = null
+    saveSweepState(null, slot)
     return false
   }
   return true
 }
 
-// ─── WEEKEND ─────────────────────────────────────────────────────────────────
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+
 function isWeekend(): boolean {
   const day = new Date().getUTCDay()
   return day === 0 || day === 6
 }
 
-// ─── VOLATILITY & REGIME ─────────────────────────────────────────────────────
-function getVolatilityBucket(
-  klines: Array<{ high: number; low: number; close: number }>
-): 'low' | 'medium' | 'high' {
+function getVolatilityBucket(klines: Array<{ high: number; low: number; close: number }>) {
   const sample = klines.slice(-10)
   if (!sample.length) return 'medium'
-  const avgRangePct =
-    sample.reduce((sum, k) => sum + ((k.high - k.low) / k.close) * 100, 0) / sample.length
+  const avgRangePct = sample.reduce((sum, k) => sum + ((k.high - k.low) / k.close) * 100, 0) / sample.length
   if (avgRangePct < 0.35) return 'low'
   if (avgRangePct < 1) return 'medium'
   return 'high'
 }
 
-function getMarketRegime(
-  klines: Array<{ high: number; low: number; close: number }>
-): 'trend' | 'range' | 'breakout' | 'reversal' {
+function getMarketRegime(klines: Array<{ high: number; low: number; close: number }>) {
   const sample = klines.slice(-12)
   if (sample.length < 4) return 'range'
-  const highs = sample.map((k) => k.high)
-  const lows = sample.map((k) => k.low)
-  const closes = sample.map((k) => k.close)
+  const highs = sample.map(k => k.high)
+  const lows = sample.map(k => k.low)
+  const closes = sample.map(k => k.close)
   const maxHigh = Math.max(...highs)
   const minLow = Math.min(...lows)
   const last = closes.at(-1)!
@@ -172,498 +121,461 @@ function getMarketRegime(
   return 'range'
 }
 
-// ─── HTF BIAS ────────────────────────────────────────────────────────────────
-function getHTFBias(
-  klines: Array<{ close: number }>,
-  vwap: Array<{ vwap: number }>
-): 'bullish' | 'bearish' | 'neutral' {
-  const sample = klines.slice(-12)
-  const vwapSample = vwap.slice(-12)
-  if (sample.length < 6 || vwapSample.length < 6) return 'neutral'
-  const avgClose = sample.reduce((s, k) => s + k.close, 0) / sample.length
-  const avgVwap = vwapSample.reduce((s, v) => s + v.vwap, 0) / vwapSample.length
-  const diff = ((avgClose - avgVwap) / avgVwap) * 100
-  if (diff > 0.05) return 'bullish'
-  if (diff < -0.05) return 'bearish'
-  return 'neutral'
-}
-
-// ─── PHASE 1 : DÉTECTION SWEEP (L + F) ───────────────────────────────────────
-
-function getAvgVolume(
-  klines: Array<{ volume: number }>,
-  sweepIndex: number
-): number {
-  const lookback = klines.slice(Math.max(0, sweepIndex - 20), sweepIndex)
+function getAvgVolume(klines: Array<{ volume: number }>, idx: number): number {
+  const lookback = klines.slice(Math.max(0, idx - 20), idx)
   if (lookback.length < 5) return 0
   return lookback.reduce((s, k) => s + k.volume, 0) / lookback.length
 }
 
-function hasSweepWickQuality(
-  candle: { open: number; high: number; low: number; close: number },
-  direction: 'high' | 'low',
-  volumeMultiplier: number = 1 // ratio volume/moyenne pour adapter le seuil wick
-): boolean {
-  const totalSize = candle.high - candle.low
-  if (totalSize === 0) return false
-
-  // Seuil wick adaptatif :
-  // - Volume normal (1-3x) → seuil strict 60%
-  // - Volume extrême (>3x) → seuil assoupli 30% car le volume lui-même confirme l'événement
-  const wickThreshold = volumeMultiplier >= 3 ? 0.3 : 0.6
-
-  if (direction === 'high') {
-    const upperWick = candle.high - Math.max(candle.open, candle.close)
-    return upperWick / totalSize > wickThreshold
-  } else {
-    const lowerWick = Math.min(candle.open, candle.close) - candle.low
-    return lowerWick / totalSize > wickThreshold
+function pushOiSnapshot(slot: SlotKey, snapshot: OIBar) {
+  const buf = oiBuffers[slot]
+  const last = buf.at(-1)
+  if (!last || snapshot.time !== last.time || snapshot.openInterest !== last.openInterest) {
+    buf.push(snapshot)
+    while (buf.length > MAX_OI_POINTS) buf.shift()
+    saveOIBuffer(buf, slot)
   }
 }
 
-function hasSweepVolume(
-  klines: Array<{ volume: number }>,
-  sweepIndex: number
-): boolean {
-  const avg = getAvgVolume(klines, sweepIndex)
-  if (avg === 0) return true
-  return klines[sweepIndex].volume > avg * 1.5
+function buildOiSeriesForKlines(slot: SlotKey, klines: Array<{ time: number }>): OIBar[] {
+  const buf = oiBuffers[slot]
+  if (!klines.length || !buf.length) return []
+  return klines.map(k => {
+    let matched = buf[0]
+    for (const point of buf) {
+      if (point.time <= k.time) matched = point
+      else break
+    }
+    return { time: k.time, openInterest: matched.openInterest }
+  })
 }
 
-/**
- * PHASE 1 : Scanne les 50 dernières bougies pour détecter un nouveau sweep.
- * Si un sweep plus récent est trouvé, il remplace l'ancien.
- */
+async function initOIBuffer(slot: SlotKey, oiInterval: string) {
+  if (oiHistoryLoaded[slot] && oiBuffers[slot].length >= 10) return
+  oiHistoryLoaded[slot] = true
+  try {
+    const history = await fetchOIHistory(oiInterval, 200)
+    if (history.length > 1) {
+      const existing = new Set(oiBuffers[slot].map(p => p.time))
+      for (const point of history) {
+        if (!existing.has(point.time)) oiBuffers[slot].push(point)
+      }
+      oiBuffers[slot].sort((a, b) => a.time - b.time)
+      while (oiBuffers[slot].length > MAX_OI_POINTS) oiBuffers[slot].shift()
+      saveOIBuffer(oiBuffers[slot], slot)
+    }
+  } catch (err) {
+    console.error(`[OI] Failed to load history for ${slot}:`, err)
+    oiHistoryLoaded[slot] = false
+  }
+}
+
+// ─── DETECTION SWEEP ─────────────────────────────────────────────────────────
+
 function detectAndUpdateSweep(
+  slot: SlotKey,
   klines: Array<{ time: number; high: number; low: number; close: number; open: number; volume: number }>,
   oi: OIBar[],
   cvd: Array<{ cvd: number }>
 ): void {
-  // Structure = les 40 bougies AVANT la fenêtre de scan
-  // Scan = les 10 dernières bougies fermées
-  // Séparation stricte pour éviter que la bougie sweep soit dans sa propre structure
-  const allClosed = klines.slice(0, -1) // toutes les bougies fermées
-  if (allClosed.length < 20) return
-
-  // Scanner toutes les bougies disponibles en cherchant le sweep le plus récent
-  // Le TTL de 6h sur disque assure que les vieux sweeps expirent
-  // On exclut les 5 premières bougies pour avoir une structure de référence
+  const allClosed = klines.slice(0, -1)
   if (allClosed.length < 10) return
 
   for (let i = allClosed.length - 1; i >= 5; i--) {
     const candle = allClosed[i]
-    const candleIndex = i // index direct dans allClosed = klines sans la courante
-
-    // Structure = les bougies AVANT cette bougie (au moins 5)
     const structureKlines = allClosed.slice(Math.max(0, i - 80), i)
     if (structureKlines.length < 5) continue
 
-    const structureHigh = Math.max(...structureKlines.map((k) => k.high))
-    const structureLow = Math.min(...structureKlines.map((k) => k.low))
+    const structureHigh = Math.max(...structureKlines.map(k => k.high))
+    const structureLow = Math.min(...structureKlines.map(k => k.low))
 
-    // Sweep haussier (piège → signal SELL futur)
+    const avgVol = getAvgVolume(klines, i)
+    const volMult = avgVol > 0 ? klines[i].volume / avgVol : 1
+    if (volMult < 1.5) continue
+
+    const wickThreshold = volMult >= 3 ? 0.3 : 0.6
+    const totalSize = candle.high - candle.low
+    if (totalSize === 0) continue
+
+    if (Date.now() - candle.time * 1000 > SWEEP_TTL_MS) continue
+
+    // Sweep HIGH
     const isHighSweep = candle.high > structureHigh && candle.close < structureHigh
-    const avgVolHigh = getAvgVolume(klines, candleIndex)
-    const volMultHigh = avgVolHigh > 0 ? klines[candleIndex].volume / avgVolHigh : 1
-    if (isHighSweep && hasSweepWickQuality(candle, 'high', volMultHigh) && hasSweepVolume(klines, candleIndex)) {
-      // Ignorer les sweeps trop vieux (> TTL)
-      if (Date.now() - candle.time * 1000 > SWEEP_TTL_MS) { continue }
-      // Vérifier que ce sweep est plus récent que l'actuel
-      if (!currentSweep || candle.time * 1000 > currentSweep.detectedAt) {
+    const upperWick = candle.high - Math.max(candle.open, candle.close)
+    if (isHighSweep && upperWick / totalSize > wickThreshold) {
+      if (!sweepStates[slot] || candle.time * 1000 > sweepStates[slot]!.detectedAt) {
         const oiAtSweep = oi.find(o => o.time <= candle.time)?.openInterest ?? 0
-        const cvdAtSweep = cvd[Math.min(candleIndex, cvd.length - 1)]?.cvd ?? 0
-        currentSweep = {
-          direction: 'high',
-          detectedAt: candle.time * 1000,
+        const cvdAtSweep = cvd[Math.min(i, cvd.length - 1)]?.cvd ?? 0
+        sweepStates[slot] = {
+          direction: 'high', detectedAt: candle.time * 1000,
           structureLevel: structureHigh,
-          sweepHigh: candle.high,
-          sweepLow: candle.low,
-          oiAtSweep,
-          cvdAtSweep,
+          sweepHigh: candle.high, sweepLow: candle.low,
+          oiAtSweep, cvdAtSweep,
         }
-        saveSweepState(currentSweep)
-        console.log('[SWEEP] Nouveau sweep HIGH détecté à', new Date(currentSweep.detectedAt).toISOString())
+        saveSweepState(sweepStates[slot], slot)
+        console.log(`[SWEEP] ${slot} HIGH @ ${new Date(sweepStates[slot]!.detectedAt).toISOString()}`)
       }
       break
     }
 
-    // Sweep baissier (piège → signal BUY futur)
+    // Sweep LOW
     const isLowSweep = candle.low < structureLow && candle.close > structureLow
-    const avgVolLow = getAvgVolume(klines, candleIndex)
-    const volMultLow = avgVolLow > 0 ? klines[candleIndex].volume / avgVolLow : 1
-    if (isLowSweep && hasSweepWickQuality(candle, 'low', volMultLow) && hasSweepVolume(klines, candleIndex)) {
-      // Ignorer les sweeps trop vieux (> TTL)
-      if (Date.now() - candle.time * 1000 > SWEEP_TTL_MS) { continue }
-      if (!currentSweep || candle.time * 1000 > currentSweep.detectedAt) {
+    const lowerWick = Math.min(candle.open, candle.close) - candle.low
+    if (isLowSweep && lowerWick / totalSize > wickThreshold) {
+      if (!sweepStates[slot] || candle.time * 1000 > sweepStates[slot]!.detectedAt) {
         const oiAtSweep = oi.find(o => o.time <= candle.time)?.openInterest ?? 0
-        const cvdAtSweep = cvd[Math.min(candleIndex, cvd.length - 1)]?.cvd ?? 0
-        currentSweep = {
-          direction: 'low',
-          detectedAt: candle.time * 1000,
+        const cvdAtSweep = cvd[Math.min(i, cvd.length - 1)]?.cvd ?? 0
+        sweepStates[slot] = {
+          direction: 'low', detectedAt: candle.time * 1000,
           structureLevel: structureLow,
-          sweepHigh: candle.high,
-          sweepLow: candle.low,
-          oiAtSweep,
-          cvdAtSweep,
+          sweepHigh: candle.high, sweepLow: candle.low,
+          oiAtSweep, cvdAtSweep,
         }
-        saveSweepState(currentSweep)
-        console.log('[SWEEP] Nouveau sweep LOW détecté à', new Date(currentSweep.detectedAt).toISOString())
+        saveSweepState(sweepStates[slot], slot)
+        console.log(`[SWEEP] ${slot} LOW @ ${new Date(sweepStates[slot]!.detectedAt).toISOString()}`)
       }
       break
     }
   }
 }
 
-// ─── PHASE 2 : CONFIRMATION (R) + ENTRÉE ─────────────────────────────────────
+// ─── SCORING LFR (calibré sur backtest) ──────────────────────────────────────
 
-function oiStagningOrFalling(oi: OIBar[], lookbackBars = 5): boolean {
-  if (oi.length < lookbackBars + 1) return false
-  const recent = oi.slice(-(lookbackBars + 1))
-  const changePct = ((recent[recent.length - 1].openInterest - recent[0].openInterest) / recent[0].openInterest) * 100
-  return changePct <= 0.01
-}
-
-function hasOILiquidationDrop(oi: OIBar[]): boolean {
-  if (oi.length < 3) return false
-  const recent = oi.slice(-3)
-  const changePct = ((recent[2].openInterest - recent[0].openInterest) / recent[0].openInterest) * 100
-  return changePct < -0.1
-}
-
-function detectVwapReject(klines: Array<{ close: number }>, vwap: Array<{ vwap: number }>): boolean {
-  const lastK = klines.at(-1); const prevK = klines.at(-2)
-  const lastV = vwap.at(-1); const prevV = vwap.at(-2)
-  if (!lastK || !prevK || !lastV || !prevV) return false
-  return prevK.close > prevV.vwap && lastK.close < lastV.vwap
-}
-
-function detectVwapReclaim(klines: Array<{ close: number }>, vwap: Array<{ vwap: number }>): boolean {
-  const lastK = klines.at(-1); const prevK = klines.at(-2)
-  const lastV = vwap.at(-1); const prevV = vwap.at(-2)
-  if (!lastK || !prevK || !lastV || !prevV) return false
-  return prevK.close < prevV.vwap && lastK.close > lastV.vwap
-}
-
-function detectLH(klines: Array<{ high: number }>): boolean {
-  const last = klines.at(-1); const prev = klines.at(-3)
-  if (!last || !prev) return false
-  return last.high < prev.high
-}
-
-function detectHL(klines: Array<{ low: number }>): boolean {
-  const last = klines.at(-1); const prev = klines.at(-3)
-  if (!last || !prev) return false
-  return last.low > prev.low
-}
-
-function isFundingBlocked(fundingRate: number, action: 'BUY' | 'SELL'): boolean {
-  if (action === 'BUY' && fundingRate > 0.0005) return true
-  if (action === 'SELL' && fundingRate < -0.0005) return true
-  return false
-}
-
-function isVwapDistanceValid(distancePct: number, timeframe: string = '5m'): boolean {
-  const thresholds: Record<string, number> = {
-    '1m': 0.3,
-    '5m': 0.5,
-    '15m': 0.5,
-    '1h': 0.3, // Backtest confirme : entrées proches VWAP = meilleur win rate
+type SignalResult = {
+  action: 'BUY' | 'SELL' | 'STABLE'
+  score: number
+  reasons: string[]
+  vwap: number
+  sweepAge?: number
+  metrics: {
+    priceVsVwapPct: number
+    cvdDelta: number
+    distanceFromVwapPct: number
+    fundingRate: number
   }
-  const max = thresholds[timeframe] ?? 0.5
-  return distancePct <= max
+  marketRegime: string
+  volatilityBucket: string
 }
 
-// ─── COMPUTE SIGNAL (3 phases) ────────────────────────────────────────────────
-
-function computeSignal(args: {
-  klines: Array<{ open: number; high: number; low: number; close: number; volume: number }>
-  vwap: Array<{ vwap: number }>
-  cvd: Array<{ delta: number; cvd: number }>
-  oi: OIBar[]
+function computeSignal(
+  slot: SlotKey,
+  klines: Array<{ open: number; high: number; low: number; close: number; volume: number }>,
+  vwap: Array<{ vwap: number }>,
+  cvd: Array<{ delta: number; cvd: number }>,
   funding: { rate: number } | null
-}): SignalPayload {
-  const lastK = args.klines.at(-1)
-  const lastV = args.vwap.at(-1)
-  const lastCvd = args.cvd.at(-1)
-  const prevCvd = args.cvd.at(-2)
-  const lastOi = args.oi.at(-1)
+): SignalResult {
+  const lastK = klines.at(-1)
+  const lastV = vwap.at(-1)
+  const lastCvd = cvd.at(-1)
+  const prevCvd = cvd.at(-2)
 
-  const marketRegime = getMarketRegime(args.klines)
-  const volatilityBucket = getVolatilityBucket(args.klines)
-  const fundingRate = args.funding?.rate ?? 0
+  const marketRegime = getMarketRegime(klines)
+  const volatilityBucket = getVolatilityBucket(klines)
+  const fundingRate = funding?.rate ?? 0
   const currentVwap = lastV?.vwap ?? 0
 
-  const stable: SignalPayload = {
-    action: 'STABLE', confidence: 1, signalType: 'neutral',
-    marketRegime, volatilityBucket, vwap: currentVwap,
-    reasons: ['Pas assez de données.'],
-    metrics: { priceVsVwapPct: 0, cvdDelta: 0, oiDeltaPct: 0, fundingRate, oiChangeAbs: 0, distanceFromVwapPct: 0 },
+  const stable: SignalResult = {
+    action: 'STABLE', score: 0, reasons: ['Données insuffisantes.'],
+    vwap: currentVwap, metrics: { priceVsVwapPct: 0, cvdDelta: 0, distanceFromVwapPct: 0, fundingRate },
+    marketRegime, volatilityBucket,
   }
 
-  if (!lastK || !lastV || !lastCvd || !prevCvd || !lastOi) return stable
+  if (!lastK || !lastV || !lastCvd || !prevCvd) return stable
+
+  const sweep = sweepStates[slot]
+  if (!isSweepValid(slot) || !sweep) {
+    return {
+      ...stable,
+      reasons: ['Aucun sweep valide (< 2h).'],
+    }
+  }
 
   const priceVsVwapPct = ((lastK.close - lastV.vwap) / lastV.vwap) * 100
   const distanceFromVwapPct = Math.abs(priceVsVwapPct)
   const cvdDelta = lastCvd.cvd - prevCvd.cvd
-  const oiChangeAbs = args.oi.length > 1 ? lastOi.openInterest - args.oi[args.oi.length - 2].openInterest : 0
-  const oiDeltaPct = args.oi.length > 1 && args.oi[args.oi.length - 2].openInterest !== 0
-    ? (oiChangeAbs / args.oi[args.oi.length - 2].openInterest) * 100 : 0
+  const sweepAgeMin = (Date.now() - sweep.detectedAt) / 1000 / 60
 
-  const metrics = { priceVsVwapPct, cvdDelta, oiDeltaPct, fundingRate, oiChangeAbs, distanceFromVwapPct }
-  const htfBias = getHTFBias(args.klines, args.vwap)
   const aboveVwap = lastK.close > lastV.vwap
   const belowVwap = lastK.close < lastV.vwap
-  const vwapReject = detectVwapReject(args.klines, args.vwap)
-  const vwapReclaim = detectVwapReclaim(args.klines, args.vwap)
-  const oiDone = oiStagningOrFalling(args.oi, 5)
-  const oiLiquidated = hasOILiquidationDrop(args.oi)
-  const lhStructure = detectLH(args.klines)
-  const hlStructure = detectHL(args.klines)
+
+  // Détection rejet/reclaim VWAP
+  const prevK = klines.at(-2)
+  const prevV = vwap.at(-2)
+  const vwapReject = !!prevK && !!prevV && prevK.close > prevV.vwap && lastK.close < lastV.vwap
+  const vwapReclaim = !!prevK && !!prevV && prevK.close < prevV.vwap && lastK.close > lastV.vwap
+
+  // Structure LH/HL
+  const prev3K = klines.at(-4)
+  const lhStructure = !!prev3K && lastK.high < prev3K.high
+  const hlStructure = !!prev3K && lastK.low > prev3K.low
+
   const cvdNonStable = Math.abs(cvdDelta) > 0
 
-  // ── PHASE 2 : Si sweep valide en mémoire → scorer la confirmation (R) ──
-  if (isSweepValid() && currentSweep) {
-    const sweepAgeMin = (Date.now() - currentSweep.detectedAt) / 1000 / 60
+  const metrics = { priceVsVwapPct, cvdDelta, distanceFromVwapPct, fundingRate }
 
-    // ── SETUP SHORT : sweep HIGH mémorisé ──
-    if (currentSweep.direction === 'high' && htfBias !== 'bullish') {
-      let score = 0
-      const reasons: string[] = []
+  // ── SETUP SELL (sweep HIGH) ──
+  if (sweep.direction === 'high') {
+    let score = 0
+    const reasons: string[] = []
 
-      // L (1pt) : sweep détecté et mémorisé
+    // L (1pt)
+    score += 1
+    reasons.push(`L: Sweep HIGH (${sweepAgeMin.toFixed(0)}min).`)
+
+    // F CVD (1pt) — OI retiré du scoring (backtest: 0% lift)
+    if (cvdNonStable && lastCvd.delta <= 0) {
       score += 1
-      reasons.push(`L: Sweep HIGH mémorisé (il y a ${sweepAgeMin.toFixed(0)} min).`)
+      reasons.push('F: CVD baissier (vendeurs agressifs).')
+    } else if (cvdNonStable) {
+      score += 1
+      reasons.push('F: CVD non-stable.')
+    }
 
-      // F (1pt) : CVD baissier (agression vendeurs)
-      // OI expansion retiré du scoring — backtest confirme qu'il n'apporte pas d'edge
-      if (cvdNonStable) {
-        score += 1
-        reasons.push(lastCvd.delta < 0 ? 'F: CVD baissier (vendeurs agressifs).' : 'F: CVD non-stable (agression détectée).')
-      }
+    // R VWAP (2pts) — critère le plus prédictif (+44% lift)
+    if (vwapReject || belowVwap) {
+      score += 2
+      reasons.push('R: Rejet VWAP confirmé (2pts).')
+    }
 
-      // R (2pts) : rejet VWAP — critère le plus prédictif selon backtest (+44% lift)
-      if (vwapReject || belowVwap) {
-        score += 2
-        reasons.push('R: Rejet VWAP confirmé (critère majeur).')
-      }
+    // R Structure (1pt)
+    if (lhStructure) {
+      score += 1
+      reasons.push('R: Structure LH confirmée.')
+    }
 
-      // R (1pt) : structure LH confirmée
-      if (lhStructure) {
-        score += 1
-        reasons.push('R: Structure LH confirmée.')
-      }
-
-      if (score >= 4) {
-        return {
-          action: 'SELL', confidence: score,
-          signalType: 'bearish_retest',
-          marketRegime, volatilityBucket, vwap: lastV.vwap,
-          sweepAge: sweepAgeMin, reasons, metrics,
-        }
-      }
-
+    // Score exactement 4/5 — le 5/5 est en retard (validé par backtest)
+    if (score === 4) {
       return {
-        action: 'STABLE', confidence: score, signalType: 'neutral',
-        marketRegime, volatilityBucket, vwap: lastV.vwap,
-        sweepAge: sweepAgeMin,
-        reasons: [`Score LFR insuffisant (${score}/5) — sweep HIGH actif depuis ${sweepAgeMin.toFixed(0)} min.`],
-        metrics,
+        action: 'SELL', score, reasons,
+        vwap: lastV.vwap, sweepAge: sweepAgeMin,
+        metrics, marketRegime, volatilityBucket,
       }
     }
 
-    // ── SETUP LONG : sweep LOW mémorisé ──
-    if (currentSweep.direction === 'low' && htfBias !== 'bearish') {
-      let score = 0
-      const reasons: string[] = []
-
-      // L (1pt) : sweep détecté et mémorisé
-      score += 1
-      reasons.push(`L: Sweep LOW mémorisé (il y a ${sweepAgeMin.toFixed(0)} min).`)
-
-      // F (1pt) : CVD haussier (agression acheteurs)
-      // OI expansion retiré du scoring — backtest confirme qu'il n'apporte pas d'edge
-      if (cvdNonStable) {
-        score += 1
-        reasons.push(lastCvd.delta > 0 ? 'F: CVD haussier (acheteurs agressifs).' : 'F: CVD non-stable (agression détectée).')
-      }
-
-      // R (2pts) : reclaim VWAP — critère le plus prédictif selon backtest (+44% lift)
-      if (vwapReclaim || aboveVwap) {
-        score += 2
-        reasons.push('R: Reclaim VWAP confirmé (critère majeur).')
-      }
-
-      // R (1pt) : structure HL confirmée
-      if (hlStructure) {
-        score += 1
-        reasons.push('R: Structure HL confirmée.')
-      }
-
-      if (score >= 4) {
-        return {
-          action: 'BUY', confidence: score,
-          signalType: 'bullish_retest',
-          marketRegime, volatilityBucket, vwap: lastV.vwap,
-          sweepAge: sweepAgeMin, reasons, metrics,
-        }
-      }
-
-      return {
-        action: 'STABLE', confidence: score, signalType: 'neutral',
-        marketRegime, volatilityBucket, vwap: lastV.vwap,
-        sweepAge: sweepAgeMin,
-        reasons: [`Score LFR insuffisant (${score}/5) — sweep LOW actif depuis ${sweepAgeMin.toFixed(0)} min.`],
-        metrics,
-      }
+    return {
+      action: 'STABLE', score, reasons: [`Score ${score}/5 — sweep HIGH actif ${sweepAgeMin.toFixed(0)}min.`],
+      vwap: lastV.vwap, sweepAge: sweepAgeMin, metrics, marketRegime, volatilityBucket,
     }
   }
 
-  const fallbackReason = currentSweep
-    ? [`Sweep ${currentSweep.direction.toUpperCase()} actif (${Math.round((Date.now() - currentSweep.detectedAt) / 60000)}min) — en attente de réaction VWAP.`]
-    : ['Aucun sweep actif en mémoire.']
+  // ── SETUP BUY (sweep LOW) ──
+  if (sweep.direction === 'low') {
+    let score = 0
+    const reasons: string[] = []
 
-  return {
-    action: 'STABLE', confidence: 1, signalType: 'neutral',
-    marketRegime, volatilityBucket, vwap: currentVwap,
-    reasons: fallbackReason,
-    metrics,
+    // L (1pt)
+    score += 1
+    reasons.push(`L: Sweep LOW (${sweepAgeMin.toFixed(0)}min).`)
+
+    // F CVD (1pt)
+    if (cvdNonStable && lastCvd.delta >= 0) {
+      score += 1
+      reasons.push('F: CVD haussier (acheteurs agressifs).')
+    } else if (cvdNonStable) {
+      score += 1
+      reasons.push('F: CVD non-stable.')
+    }
+
+    // R VWAP (2pts)
+    if (vwapReclaim || aboveVwap) {
+      score += 2
+      reasons.push('R: Reclaim VWAP confirmé (2pts).')
+    }
+
+    // R Structure (1pt)
+    if (hlStructure) {
+      score += 1
+      reasons.push('R: Structure HL confirmée.')
+    }
+
+    // Score exactement 4/5
+    if (score === 4) {
+      return {
+        action: 'BUY', score, reasons,
+        vwap: lastV.vwap, sweepAge: sweepAgeMin,
+        metrics, marketRegime, volatilityBucket,
+      }
+    }
+
+    return {
+      action: 'STABLE', score, reasons: [`Score ${score}/5 — sweep LOW actif ${sweepAgeMin.toFixed(0)}min.`],
+      vwap: lastV.vwap, sweepAge: sweepAgeMin, metrics, marketRegime, volatilityBucket,
+    }
   }
+
+  return { ...stable, reasons: ['Direction sweep inconnue.'] }
 }
 
-function isValidSignalType(signalType: SignalPayload['signalType']) {
-  return ['bullish_retest', 'bearish_retest'].includes(signalType)
-}
+// ─── HANDLER PRINCIPAL ────────────────────────────────────────────────────────
 
 export async function GET(req: NextRequest) {
-  const timeframe = (req.nextUrl.searchParams.get('timeframe') ?? '5m') as Timeframe
-  const safeTimeframe: Timeframe = ['1m', '5m', '15m', '1h'].includes(timeframe) ? timeframe : '5m'
+  const weekend = isWeekend()
 
   try {
-    await initOIBufferIfNeeded(safeTimeframe)
-
-    const [klines, trades, oiSnapshot, ticker, funding] = await Promise.all([
-      fetchKlines(safeTimeframe, 200),
-      fetchAggTrades(100),
-      fetchCurrentOI(),
-      fetchTicker(),
-      fetchFundingRate(),
+    // Fetch données communes BTC
+    const [btcKlines1h, btcKlines15m, btcOI1h, btcOI15m, btcTicker, btcFunding] = await Promise.all([
+      fetchKlines('BTCUSDT', '60', 200),
+      fetchKlines('BTCUSDT', '15', 200),
+      fetchCurrentOI('BTCUSDT', '1h'),
+      fetchCurrentOI('BTCUSDT', '15min'),
+      fetchTicker('BTCUSDT'),
+      fetchFundingRate('BTCUSDT'),
     ])
 
-    pushOiSnapshot(oiSnapshot)
+    // Fetch données communes ETH
+    const [ethKlines1h, ethKlines15m, ethOI1h, ethOI15m, ethTicker, ethFunding] = await Promise.all([
+      fetchKlines('ETHUSDT', '60', 200),
+      fetchKlines('ETHUSDT', '15', 200),
+      fetchCurrentOI('ETHUSDT', '1h'),
+      fetchCurrentOI('ETHUSDT', '15min'),
+      fetchTicker('ETHUSDT'),
+      fetchFundingRate('ETHUSDT'),
+    ])
 
-    const vwap = calculateVWAP(klines, 200)
-    const cvd = calculateCVD(trades, klines)
-    const oi = buildOiSeriesForKlines(klines)
+    // Init OI buffers si nécessaire
+    await Promise.all([
+      initOIBuffer('BTC-1h', '1h'),
+      initOIBuffer('ETH-1h', '1h'),
+      initOIBuffer('BTC-15m', '15min'),
+      initOIBuffer('ETH-15m', '15min'),
+    ])
 
-    evaluateOpenSetups(klines)
+    // Push snapshots OI
+    pushOiSnapshot('BTC-1h', btcOI1h)
+    pushOiSnapshot('ETH-1h', ethOI1h)
+    pushOiSnapshot('BTC-15m', btcOI15m)
+    pushOiSnapshot('ETH-15m', ethOI15m)
 
-    // PHASE 1 : détecter et mémoriser les sweeps récents
-    detectAndUpdateSweep(klines, oi, cvd)
+    // Construire les données par slot
+    const slotData: Record<SlotKey, {
+      klines: typeof btcKlines1h
+      vwap: { time: number; vwap: number }[]
+      cvd: { time: number; delta: number; cvd: number }[]
+      oi: OIBar[]
+      ticker: typeof btcTicker
+      funding: typeof btcFunding
+    }> = {
+      'BTC-1h':  { klines: btcKlines1h,  vwap: calculateVWAP(btcKlines1h, 200),  cvd: calculateCVD([], btcKlines1h),  oi: buildOiSeriesForKlines('BTC-1h', btcKlines1h),   ticker: btcTicker, funding: btcFunding },
+      'ETH-1h':  { klines: ethKlines1h,  vwap: calculateVWAP(ethKlines1h, 200),  cvd: calculateCVD([], ethKlines1h),  oi: buildOiSeriesForKlines('ETH-1h', ethKlines1h),   ticker: ethTicker, funding: ethFunding },
+      'BTC-15m': { klines: btcKlines15m, vwap: calculateVWAP(btcKlines15m, 200), cvd: calculateCVD([], btcKlines15m), oi: buildOiSeriesForKlines('BTC-15m', btcKlines15m), ticker: btcTicker, funding: btcFunding },
+      'ETH-15m': { klines: ethKlines15m, vwap: calculateVWAP(ethKlines15m, 200), cvd: calculateCVD([], ethKlines15m), oi: buildOiSeriesForKlines('ETH-15m', ethKlines15m), ticker: ethTicker, funding: ethFunding },
+    }
 
-    // PHASE 2 : scorer la confirmation
-    const signal = computeSignal({ klines, vwap, cvd, oi, funding })
+    const slotSignals: Record<SlotKey, SignalResult> = {} as Record<SlotKey, SignalResult>
 
-    const currentPosition = getCurrentPosition()
-    const lastReverseBarKey = getLastReverseBarKey()
-    const lastK = klines.at(-1)
-    const prevK = klines.at(-2)
-    const bullishStructureBreak = !!lastK && !!prevK && lastK.close > prevK.high
-    const bearishStructureBreak = !!lastK && !!prevK && lastK.close < prevK.low
-    const referenceBarKey = `${safeTimeframe}-${lastK?.time ?? 0}`
+    // Traiter chaque slot indépendamment
+    for (const config of SLOT_CONFIGS) {
+      const { slot } = config
+      const data = slotData[slot]
 
-    const weekend = isWeekend()
-    const cooldown = isInCooldown(safeTimeframe)
-    const fundingBlocked = signal.action !== 'STABLE'
-      ? isFundingBlocked(signal.metrics.fundingRate, signal.action as 'BUY' | 'SELL')
-      : false
-    const vwapDistanceOk = isVwapDistanceValid(signal.metrics.distanceFromVwapPct, safeTimeframe)
+      // Évaluer les positions ouvertes
+      evaluateOpenSetups(data.klines, slot)
 
-    const canTrade = !weekend && !cooldown && !fundingBlocked && vwapDistanceOk && signal.action !== 'STABLE'
+      // Détecter sweep
+      detectAndUpdateSweep(slot, data.klines, data.oi, data.cvd)
 
-    if (canTrade && ticker) {
-      if (!currentPosition) {
-        if (signal.confidence >= 4 && !hasRecentDuplicate(signal.action as 'BUY' | 'SELL', safeTimeframe, Date.now())) {
-          console.log('[TRADE] openPosition:', signal.action, ticker.price)
+      // Scorer le signal
+      const signal = computeSignal(slot, data.klines, data.vwap, data.cvd, data.funding)
+      slotSignals[slot] = signal
+
+      // Trading si conditions réunies
+      if (!weekend && signal.action !== 'STABLE' && signal.score === 4) {
+        const cooldown = isInCooldown(slot)
+        const distanceOk = signal.metrics.distanceFromVwapPct <= config.vwapDistanceMax
+        const fundingRate = signal.metrics.fundingRate
+        const fundingBlocked = signal.action === 'BUY' && fundingRate > 0.0005
+          || signal.action === 'SELL' && fundingRate < -0.0005
+
+        const currentPos = getCurrentPosition(slot)
+        const lastK = data.klines.at(-1)
+        const referenceBarKey = `${slot}-${lastK?.time ?? 0}`
+
+        const canTrade = !cooldown && distanceOk && !fundingBlocked && !currentPos && !!data.ticker
+
+        if (canTrade && !hasRecentDuplicate(slot, signal.action as 'BUY' | 'SELL', Date.now())) {
+          console.log(`[TRADE] ${slot} openPosition: ${signal.action} @ ${data.ticker!.price}`)
           await openPosition({
+            slot,
             timestamp: Date.now(),
-            timeframe: safeTimeframe,
+            timeframe: config.timeframe,
             action: signal.action as 'BUY' | 'SELL',
-            confidence: signal.confidence,
-            entryPrice: ticker.price,
+            confidence: signal.score,
+            entryPrice: data.ticker!.price,
             vwap: signal.vwap,
             referenceBarKey,
-            signalType: signal.signalType,
-            marketRegime: signal.marketRegime,
+            signalType: signal.action === 'BUY' ? 'bullish_retest' : 'bearish_retest',
+            marketRegime: signal.marketRegime as 'trend' | 'range' | 'breakout' | 'reversal',
             vwapDistancePct: signal.metrics.distanceFromVwapPct,
-            volatilityBucket: signal.volatilityBucket,
+            volatilityBucket: signal.volatilityBucket as 'low' | 'medium' | 'high',
           })
           // Reset sweep après entrée
-          currentSweep = null
-          saveSweepState(null)
-        }
-      } else if (currentPosition.action !== signal.action) {
-        const structureOk = signal.action === 'BUY' ? bullishStructureBreak : bearishStructureBreak
-        const canReverse =
-          signal.confidence >= 5 &&
-          signal.confidence > currentPosition.confidence &&
-          structureOk &&
-          isValidSignalType(signal.signalType) &&
-          lastReverseBarKey !== referenceBarKey
-
-        if (canReverse) {
-          console.log('[TRADE] reversePosition:', signal.action, ticker.price)
-          await reversePosition({
-            timestamp: Date.now(),
-            timeframe: safeTimeframe,
-            action: signal.action as 'BUY' | 'SELL',
-            confidence: signal.confidence,
-            entryPrice: ticker.price,
-            vwap: signal.vwap,
-            referenceBarKey,
-            signalType: signal.signalType,
-            marketRegime: signal.marketRegime,
-            vwapDistancePct: signal.metrics.distanceFromVwapPct,
-            volatilityBucket: signal.volatilityBucket,
-          })
-          currentSweep = null
-          saveSweepState(null)
+          sweepStates[slot] = null
+          saveSweepState(null, slot)
         }
       }
     }
 
     return NextResponse.json({
-      klines, vwap, cvd, oi, ticker, funding, signal,
-      weekend, cooldown, fundingBlocked, vwapDistanceOk,
-      oiBufferSize: oiSessionBuffer.length,
-      activeSweep: currentSweep ? {
-        direction: currentSweep.direction,
-        ageMinutes: Math.round((Date.now() - currentSweep.detectedAt) / 1000 / 60),
-        structureLevel: currentSweep.structureLevel,
-      } : null,
-      currentPosition: getCurrentPosition(),
+      // Données principales BTC 1h pour l'UI
+      klines: slotData['BTC-1h'].klines,
+      vwap: slotData['BTC-1h'].vwap,
+      cvd: slotData['BTC-1h'].cvd,
+      oi: slotData['BTC-1h'].oi,
+      ticker: btcTicker,
+      funding: btcFunding,
+
+      // Signal principal (BTC 1h pour compatibilité UI)
+      signal: {
+        action: slotSignals['BTC-1h'].action,
+        confidence: slotSignals['BTC-1h'].score,
+        signalType: slotSignals['BTC-1h'].action === 'BUY' ? 'bullish_retest'
+          : slotSignals['BTC-1h'].action === 'SELL' ? 'bearish_retest' : 'neutral',
+        marketRegime: slotSignals['BTC-1h'].marketRegime,
+        volatilityBucket: slotSignals['BTC-1h'].volatilityBucket,
+        vwap: slotSignals['BTC-1h'].vwap,
+        reasons: slotSignals['BTC-1h'].reasons,
+        sweepAge: slotSignals['BTC-1h'].sweepAge,
+        metrics: {
+          ...slotSignals['BTC-1h'].metrics,
+          oiDeltaPct: 0,
+          oiChangeAbs: 0,
+        },
+      },
+
+      // Tous les signaux des 4 slots
+      slotSignals: Object.fromEntries(
+        Object.entries(slotSignals).map(([k, v]) => [k, {
+          action: v.action, score: v.score, reasons: v.reasons,
+          vwap: v.vwap, sweepAge: v.sweepAge, metrics: v.metrics,
+        }])
+      ),
+
+      // Positions et stats
+      allPositions: getAllPositions(),
+      currentPosition: getCurrentPosition('BTC-1h'),
       setupHistory: getRecentSetups(),
       setupStats: getStats(),
+      slotStats: getSlotStats(),
       sessionStats: getSessionStats(),
+
+      // Sweeps actifs
+      activeSweeps: Object.fromEntries(
+        (['BTC-1h', 'ETH-1h', 'BTC-15m', 'ETH-15m'] as SlotKey[]).map(slot => [
+          slot,
+          sweepStates[slot] ? {
+            direction: sweepStates[slot]!.direction,
+            ageMinutes: Math.round((Date.now() - sweepStates[slot]!.detectedAt) / 60000),
+            structureLevel: sweepStates[slot]!.structureLevel,
+          } : null
+        ])
+      ),
+
+      weekend,
       lastUpdate: Date.now(),
-      timeframe: safeTimeframe,
+      timeframe: '1h',
     })
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown API route error'
-    return NextResponse.json(
-      {
-        error: message,
-        klines: [], vwap: [], cvd: [], oi: [],
-        ticker: null, funding: null, signal: null,
-        weekend: isWeekend(), cooldown: false, fundingBlocked: false, vwapDistanceOk: true,
-        oiBufferSize: oiSessionBuffer.length,
-        activeSweep: null,
-        currentPosition: getCurrentPosition(),
-        setupHistory: getRecentSetups(),
-        setupStats: getStats(),
-        sessionStats: getSessionStats(),
-        lastUpdate: Date.now(),
-      },
-      { status: 500 }
-    )
+    const message = error instanceof Error ? error.message : 'Unknown error'
+    return NextResponse.json({ error: message }, { status: 500 })
   }
 }
