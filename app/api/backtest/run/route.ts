@@ -153,8 +153,8 @@ function buildSweepEvent(
   // L (1pt)
   scoreL = 1
 
-  // F — OI expansion (1pt)
-  if (oiExpanded) scoreF += 1
+  // F — OI expansion retiré du scoring (backtest confirme : pas d'edge)
+  // scoreF += 0
 
   // F — CVD (estimé depuis la direction de la bougie suivante)
   const nextBar = bars[i + 1]
@@ -165,12 +165,12 @@ function buildSweepEvent(
   if (direction === 'high' && cvdDirection === 'bearish') scoreF += 1
   if (direction === 'low' && cvdDirection === 'bullish') scoreF += 1
 
-  // R — Rejet/Reclaim VWAP (1pt) — vérifié sur les 2 bougies suivantes
+  // R — Rejet/Reclaim VWAP (2pts) — critère le plus prédictif (+44% lift)
   const checkBars = bars.slice(i + 1, i + 4)
   const vwapReaction = checkBars.some(b =>
     direction === 'high' ? b.close < vwapAtEntry : b.close > vwapAtEntry
   )
-  if (vwapReaction) scoreR += 1
+  if (vwapReaction) scoreR += 2
 
   // R — Structure LH/HL (1pt)
   const prev3High = bars[Math.max(0, i - 3)]?.high ?? 0
@@ -182,7 +182,7 @@ function buildSweepEvent(
 
   const score = scoreL + scoreF + scoreR
 
-  // Simulation trade (SL = structureLevel ± 0.2%, TP = 2R)
+  // Simulation trade — TP à 3R (backtest montre que le prix continue souvent au-delà de 2R)
   const slPct = 0.002
   const entryPrice = candle.close
   const slPrice = direction === 'high'
@@ -190,23 +190,23 @@ function buildSweepEvent(
     : structureLevel * (1 - slPct)
   const risk = Math.abs(entryPrice - slPrice)
   const tpPrice = direction === 'high'
-    ? entryPrice - risk * 2
-    : entryPrice + risk * 2
+    ? entryPrice - risk * 3
+    : entryPrice + risk * 3
 
-  // Résultat dans les 10 bougies suivantes
+  // Résultat dans les 15 bougies suivantes (plus large pour 3R)
   let outcome: 'win' | 'loss' | 'breakeven' = 'breakeven'
   let rMultiple = 0
   let barsToClose = 0
 
-  for (let j = i + 1; j < Math.min(i + 11, bars.length); j++) {
+  for (let j = i + 1; j < Math.min(i + 16, bars.length); j++) {
     const b = bars[j]
     barsToClose = j - i
 
     if (direction === 'high') {
-      if (b.low <= tpPrice) { outcome = 'win'; rMultiple = 2; break }
+      if (b.low <= tpPrice) { outcome = 'win'; rMultiple = 3; break }
       if (b.high >= slPrice) { outcome = 'loss'; rMultiple = -1; break }
     } else {
-      if (b.high >= tpPrice) { outcome = 'win'; rMultiple = 2; break }
+      if (b.high >= tpPrice) { outcome = 'win'; rMultiple = 3; break }
       if (b.low <= slPrice) { outcome = 'loss'; rMultiple = -1; break }
     }
   }
@@ -332,15 +332,15 @@ export async function GET() {
     const withoutExpansion = filtered.filter(s => !s.oiExpanded)
 
     // Distribution R
-    const buckets = ['-2R', '-1R', '0R', '+1R', '+2R', '+3R+']
+    const buckets = ['-2R', '-1R', '0R', '+1R', '+2R', '+3R']
     const rDistribution = buckets.map(bucket => {
       let count = 0
       if (bucket === '-2R') count = filtered.filter(s => s.rMultiple <= -2).length
       else if (bucket === '-1R') count = filtered.filter(s => s.rMultiple > -2 && s.rMultiple <= -0.5).length
       else if (bucket === '0R') count = filtered.filter(s => s.outcome === 'breakeven').length
       else if (bucket === '+1R') count = filtered.filter(s => s.rMultiple > 0 && s.rMultiple < 2).length
-      else if (bucket === '+2R') count = filtered.filter(s => s.rMultiple === 2).length
-      else count = filtered.filter(s => s.rMultiple > 2).length
+      else if (bucket === '+2R') count = filtered.filter(s => s.rMultiple >= 2 && s.rMultiple < 3).length
+      else count = filtered.filter(s => s.rMultiple >= 3).length
       return { bucket, count }
     })
 
@@ -372,4 +372,5 @@ export async function GET() {
     const message = error instanceof Error ? error.message : 'Erreur backtest'
     return NextResponse.json({ error: message }, { status: 500 })
   }
+}
 }
