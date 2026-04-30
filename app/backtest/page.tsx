@@ -2,13 +2,25 @@
 
 import { useState } from 'react'
 
-type SlotStats = {
-  slot: string
+type StatBlock = {
   trades: number
   wins: number
   winRate: number
   avgR: number
   expectancy: number
+}
+
+type SlotStats = {
+  slot: string
+  symbol: string
+  tf: string
+  totalSweeps: number
+  L: StatBlock
+  LF: StatBlock
+  LFR: StatBlock
+  byScore: Record<number, StatBlock>
+  bySweepAge: Record<string, StatBlock>
+  bySession: Record<string, StatBlock>
   tradesPerYear: number
 }
 
@@ -32,7 +44,8 @@ type CombinedResults = {
       annualReturn: number
     }
   }
-  bySession: { session: string; trades: number; winRate: number }[]
+  bySession: { session: string; trades: number; wins: number; winRate: number }[]
+  bySweepAge: { age: string; trades: number; wins: number; winRate: number; avgR: number }[]
 }
 
 function colorWR(wr: number) {
@@ -58,14 +71,16 @@ function SlotCard({ s }: { s: SlotStats }) {
         </div>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 13 }}>
-        <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>Trades/an</div>
+        <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>Sweeps total</div>
+        <div style={{ fontWeight: 700 }}>{s.totalSweeps}</div>
+        <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>Trades/an (4/5)</div>
         <div style={{ fontWeight: 700 }}>{s.tradesPerYear}</div>
-        <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>Win Rate</div>
-        <div style={{ fontWeight: 700, color: colorWR(s.winRate) }}>{s.winRate}%</div>
-        <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>Avg R</div>
-        <div style={{ fontWeight: 700, color: s.avgR >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>{s.avgR}R</div>
+        <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>WR 4/5</div>
+        <div style={{ fontWeight: 700, color: colorWR(s.LFR.winRate) }}>{s.LFR.winRate}%</div>
         <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>Expectancy</div>
-        <div style={{ fontWeight: 700, color: s.expectancy >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>{s.expectancy}R/t</div>
+        <div style={{ fontWeight: 700, color: s.LFR.expectancy >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>{s.LFR.expectancy}R/t</div>
+        <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>WR Fresh</div>
+        <div style={{ fontWeight: 700, color: colorWR(s.bySweepAge['fresh']?.winRate ?? 0) }}>{s.bySweepAge['fresh']?.winRate ?? 0}%</div>
       </div>
     </div>
   )
@@ -208,6 +223,25 @@ export default function BacktestCombinedPage() {
                   ⚠ Simulation basée sur les résultats historiques — pas une garantie de performance future
                 </div>
               </div>
+            </div>
+
+            {/* Age du sweep combiné */}
+            <div style={{ background: 'var(--bg-card)', border: '1px solid var(--bg-border)', borderRadius: 12, padding: 16 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12, fontFamily: 'monospace' }}>
+                ⏱ Age du Sweep (combiné)
+              </div>
+              {results.bySweepAge.map(s => (
+                <div key={s.age} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', background: s.age === 'fresh' ? 'rgba(0,212,168,0.06)' : 'rgba(255,255,255,0.03)', borderRadius: 8, border: s.age === 'fresh' ? '1px solid rgba(0,212,168,0.2)' : '1px solid var(--bg-border)', marginBottom: 6 }}>
+                  <span style={{ fontSize: 13, fontFamily: 'monospace', color: 'var(--text-secondary)' }}>
+                    {s.age === 'fresh' ? 'Fresh (0-2 bougies)' : s.age === 'recent' ? 'Recent (3-6 bougies)' : 'Old (>6 bougies)'}
+                  </span>
+                  <div style={{ display: 'flex', gap: 16, fontSize: 12, fontFamily: 'monospace' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>{s.trades} trades</span>
+                    <span style={{ color: colorWR(s.winRate), fontWeight: 700 }}>{s.winRate}%</span>
+                    <span style={{ color: s.avgR >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>{s.avgR}R avg</span>
+                  </div>
+                </div>
+              ))}
             </div>
 
             {/* Par session */}
