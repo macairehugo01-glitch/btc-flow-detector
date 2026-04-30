@@ -96,6 +96,7 @@ type StatBlock = { trades: number; wins: number; winRate: number; avgR: number; 
 
 type BacktestResults = {
   generatedAt: string
+  symbol: string
   totalBars: number
   totalSweeps: number
   L: StatBlock
@@ -324,16 +325,30 @@ function suggestWeights(sweeps: SweepEvent[]) {
 
 // ─── HANDLER ─────────────────────────────────────────────────────────────────
 
-export async function GET() {
+export async function GET(req: Request) {
+  const url = new URL(req.url)
+  const symbol = (url.searchParams.get('symbol') ?? 'BTCUSDT').toUpperCase()
+  const allowed = ['BTCUSDT', 'ETHUSDT']
+  if (!allowed.includes(symbol)) {
+    return NextResponse.json({ error: `Symbole non supporté: ${symbol}` }, { status: 400 })
+  }
+
+  const HISTORY_FILE = path.join(DATA_DIR, `backtest-history-${symbol.toLowerCase()}.json`)
+  // Fallback sur l'ancien fichier BTC si le nouveau n'existe pas encore
+  const FALLBACK_FILE = path.join(DATA_DIR, 'backtest-history.json')
+  const fileToUse = fs.existsSync(HISTORY_FILE) ? HISTORY_FILE
+    : (symbol === 'BTCUSDT' && fs.existsSync(FALLBACK_FILE)) ? FALLBACK_FILE
+    : null
+
   try {
-    if (!fs.existsSync(HISTORY_FILE)) {
+    if (!fileToUse) {
       return NextResponse.json(
-        { error: 'Données manquantes. Lance /api/backtest/collect d\'abord.' },
+        { error: `Données ${symbol} manquantes. Lance /api/backtest/collect?symbol=${symbol} d'abord.` },
         { status: 400 }
       )
     }
 
-    const raw = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8')) as RawBar[]
+    const raw = JSON.parse(fs.readFileSync(fileToUse, 'utf-8')) as RawBar[]
 
     const allSweeps: SweepEvent[] = []
     for (let i = 10; i < raw.length - 15; i++) {
@@ -406,6 +421,7 @@ export async function GET() {
 
     const results: BacktestResults = {
       generatedAt: new Date().toISOString(),
+      symbol,
       totalBars: raw.length,
       totalSweeps: filtered.length,
       L: calcStats(filtered),
