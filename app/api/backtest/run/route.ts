@@ -19,6 +19,51 @@ type RawBar = {
   fundingRate: number
 }
 
+// ─── AMÉLIORATION 1 : Sessions de trading ────────────────────────────────────
+type Session = 'Asia' | 'London' | 'NewYork' | 'Overlap'
+
+function getSession(timestampSec: number): Session {
+  const hour = new Date(timestampSec * 1000).getUTCHours()
+  if (hour >= 13 && hour < 17) return 'Overlap'   // London/NY overlap — meilleur volume
+  if (hour >= 8 && hour < 16) return 'London'      // London session
+  if (hour >= 13 && hour < 22) return 'NewYork'    // NY session
+  return 'Asia'                                      // Asia session
+}
+
+// ─── AMÉLIORATION 2 : Direction funding ──────────────────────────────────────
+function isFundingAligned(fundingRate: number, direction: 'high' | 'low'): boolean {
+  // Funding positif élevé = longs surchargés → favorise SELL (sweep HIGH)
+  // Funding négatif = shorts surchargés → favorise BUY (sweep LOW)
+  if (direction === 'high' && fundingRate > 0.0002) return true
+  if (direction === 'low' && fundingRate < -0.0002) return true
+  return false
+}
+
+// ─── AMÉLIORATION 3 : Contexte HTF (trend vs range) ─────────────────────────
+function getHTFContext(bars: RawBar[], i: number): 'trend_aligned' | 'range' | 'counter_trend' {
+  // Regarder les 20 dernières bougies pour déterminer la tendance
+  const window = bars.slice(Math.max(0, i - 20), i)
+  if (window.length < 10) return 'range'
+
+  const firstClose = window[0].close
+  const lastClose = window[window.length - 1].close
+  const changePct = ((lastClose - firstClose) / firstClose) * 100
+
+  if (Math.abs(changePct) < 1.5) return 'range'
+  return changePct > 0 ? 'trend_aligned' : 'counter_trend'
+}
+
+// ─── AMÉLIORATION 4 : Age optimal du sweep ───────────────────────────────────
+type SweepAge = 'fresh' | 'recent' | 'old'
+
+function getSweepAge(barsFromSweep: number): SweepAge {
+  if (barsFromSweep <= 2) return 'fresh'    // 0-2 bougies après sweep
+  if (barsFromSweep <= 6) return 'recent'   // 3-6 bougies après sweep
+  return 'old'                               // >6 bougies = signal dégradé
+}
+
+// ─── TYPES ───────────────────────────────────────────────────────────────────
+
 type SweepEvent = {
   time: number
   direction: 'high' | 'low'
@@ -28,58 +73,60 @@ type SweepEvent = {
   oiBeforeSweep: number
   oiExpanded: boolean
   fundingAtSweep: number
-  fundingExtreme: boolean // |funding| > 0.0008
-  // Résultat
-  score: number           // 0-5 selon critères LFR
-  scoreL: number          // L seul (0 ou 1)
-  scoreF: number          // F (0-2)
-  scoreR: number          // R (0-2)
+  fundingExtreme: boolean
+  fundingAligned: boolean        // Amélioration 2
+  session: Session               // Amélioration 1
+  htfContext: string             // Amélioration 3
+  sweepAge: SweepAge             // Amélioration 4
+  score: number
+  scoreL: number
+  scoreF: number
+  scoreR: number
   outcome: 'win' | 'loss' | 'breakeven'
-  rMultiple: number       // R réalisé
+  rMultiple: number
   entryPrice: number
   slPrice: number
   tpPrice: number
   barsToClose: number
-  // Contexte
   vwapAtEntry: number
   cvdDirection: 'bullish' | 'bearish' | 'neutral'
 }
+
+type StatBlock = { trades: number; wins: number; winRate: number; avgR: number; expectancy: number }
 
 type BacktestResults = {
   generatedAt: string
   totalBars: number
   totalSweeps: number
+  L: StatBlock
+  LF: StatBlock
+  LFR: StatBlock
+  byScore: Record<number, StatBlock>
 
-  // L seul
-  L: { trades: number; wins: number; winRate: number; avgR: number; expectancy: number }
-
-  // L+F
-  LF: { trades: number; wins: number; winRate: number; avgR: number; expectancy: number }
-
-  // L+F+R (stratégie complète)
-  LFR: { trades: number; wins: number; winRate: number; avgR: number; expectancy: number }
-
-  // Par score
-  byScore: Record<number, { trades: number; wins: number; winRate: number; avgR: number }>
-
-  // Funding comme filtre
+  // Funding directionnel (amélioration 2)
   fundingFilter: {
-    withExtreme: { trades: number; wins: number; winRate: number }
-    withoutExtreme: { trades: number; wins: number; winRate: number }
+    aligned: StatBlock
+    neutral: StatBlock
+    counter: StatBlock
   }
 
-  // OI expansion comme filtre
+  // OI filtre
   oiFilter: {
     withExpansion: { trades: number; wins: number; winRate: number }
     withoutExpansion: { trades: number; wins: number; winRate: number }
   }
 
-  // Distribution des R
+  // Sessions (amélioration 1)
+  bySession: Record<Session, StatBlock>
+
+  // HTF context (amélioration 3)
+  byHTFContext: Record<string, StatBlock>
+
+  // Age du sweep (amélioration 4)
+  bySweepAge: Record<SweepAge, StatBlock>
+
   rDistribution: { bucket: string; count: number }[]
-
-  // Poids suggérés (calibrés sur les résultats)
-  suggestedWeights: { L: number; F_oi: number; F_cvd: number; R_vwap: number; R_structure: number }
-
+  suggestedWeights: { L: number; F_oi: number; F_cvd: number; F_funding: number; R_vwap: number; R_structure: number }
   sweeps: SweepEvent[]
 }
 
@@ -93,7 +140,6 @@ function detectSweep(bars: RawBar[], i: number): SweepEvent | null {
   const structureHigh = Math.max(...structure.map(k => k.high))
   const structureLow = Math.min(...structure.map(k => k.low))
 
-  // Volume moyen des 20 bougies précédentes
   const avgVol = bars.slice(Math.max(0, i - 20), i)
     .reduce((s, k) => s + k.volume, 0) / Math.min(20, i)
 
@@ -103,26 +149,24 @@ function detectSweep(bars: RawBar[], i: number): SweepEvent | null {
   const totalSize = candle.high - candle.low
   if (totalSize === 0 || !hasVolume) return null
 
-  // OI avant sweep (barre précédente)
   const oiBeforeSweep = bars[Math.max(0, i - 1)].oi
   const oiAtSweep = candle.oi
   const oiExpanded = oiBeforeSweep > 0 && oiAtSweep > oiBeforeSweep * 1.0002
-
   const fundingAtSweep = candle.fundingRate
   const fundingExtreme = Math.abs(fundingAtSweep) > 0.0008
+  const session = getSession(candle.time)
+  const htfContext = getHTFContext(bars, i)
 
-  // SWEEP HIGH
   const isHighSweep = candle.high > structureHigh && candle.close < structureHigh
   const upperWick = candle.high - Math.max(candle.open, candle.close)
   if (isHighSweep && upperWick / totalSize > wickThreshold) {
-    return buildSweepEvent(bars, i, 'high', structureHigh, oiAtSweep, oiBeforeSweep, oiExpanded, fundingAtSweep, fundingExtreme)
+    return buildSweepEvent(bars, i, 'high', structureHigh, oiAtSweep, oiBeforeSweep, oiExpanded, fundingAtSweep, fundingExtreme, session, htfContext)
   }
 
-  // SWEEP LOW
   const isLowSweep = candle.low < structureLow && candle.close > structureLow
   const lowerWick = Math.min(candle.open, candle.close) - candle.low
   if (isLowSweep && lowerWick / totalSize > wickThreshold) {
-    return buildSweepEvent(bars, i, 'low', structureLow, oiAtSweep, oiBeforeSweep, oiExpanded, fundingAtSweep, fundingExtreme)
+    return buildSweepEvent(bars, i, 'low', structureLow, oiAtSweep, oiBeforeSweep, oiExpanded, fundingAtSweep, fundingExtreme, session, htfContext)
   }
 
   return null
@@ -137,26 +181,30 @@ function buildSweepEvent(
   oiBeforeSweep: number,
   oiExpanded: boolean,
   fundingAtSweep: number,
-  fundingExtreme: boolean
+  fundingExtreme: boolean,
+  session: Session,
+  htfContext: string
 ): SweepEvent {
   const candle = bars[i]
 
-  // Calcul VWAP simplifié sur les 50 dernières bougies
   const vwapWindow = bars.slice(Math.max(0, i - 50), i + 1)
   const totalPV = vwapWindow.reduce((s, k) => s + ((k.high + k.low + k.close) / 3) * k.volume, 0)
   const totalVol = vwapWindow.reduce((s, k) => s + k.volume, 0)
   const vwapAtEntry = totalVol > 0 ? totalPV / totalVol : candle.close
 
-  // Scoring LFR
-  let scoreL = 0, scoreF = 0, scoreR = 0
+  const fundingAligned = isFundingAligned(fundingAtSweep, direction)
 
-  // L (1pt)
+  // Trouver les bougies de confirmation (jusqu'à 6 bougies après le sweep)
+  const confirmBars = bars.slice(i + 1, i + 7)
+  const entryBarIndex = confirmBars.findIndex(b =>
+    direction === 'high' ? b.close < vwapAtEntry : b.close > vwapAtEntry
+  )
+  const sweepAge = getSweepAge(entryBarIndex >= 0 ? entryBarIndex + 1 : 6)
+
+  // Scoring
+  let scoreL = 0, scoreF = 0, scoreR = 0
   scoreL = 1
 
-  // F — OI expansion retiré du scoring (backtest confirme : pas d'edge)
-  // scoreF += 0
-
-  // F — CVD (estimé depuis la direction de la bougie suivante)
   const nextBar = bars[i + 1]
   const cvdDirection: 'bullish' | 'bearish' | 'neutral' = nextBar
     ? nextBar.close > nextBar.open ? 'bullish' : nextBar.close < nextBar.open ? 'bearish' : 'neutral'
@@ -165,14 +213,14 @@ function buildSweepEvent(
   if (direction === 'high' && cvdDirection === 'bearish') scoreF += 1
   if (direction === 'low' && cvdDirection === 'bullish') scoreF += 1
 
-  // R — Rejet/Reclaim VWAP (2pts) — critère le plus prédictif (+44% lift)
+  // R VWAP (2pts)
   const checkBars = bars.slice(i + 1, i + 4)
   const vwapReaction = checkBars.some(b =>
     direction === 'high' ? b.close < vwapAtEntry : b.close > vwapAtEntry
   )
   if (vwapReaction) scoreR += 2
 
-  // R — Structure LH/HL (1pt)
+  // R Structure (1pt)
   const prev3High = bars[Math.max(0, i - 3)]?.high ?? 0
   const prev3Low = bars[Math.max(0, i - 3)]?.low ?? 0
   const lastHigh = bars[i + 1]?.high ?? 0
@@ -182,7 +230,7 @@ function buildSweepEvent(
 
   const score = scoreL + scoreF + scoreR
 
-  // Simulation trade — TP à 3R (backtest montre que le prix continue souvent au-delà de 2R)
+  // Trade — TP 3R
   const slPct = 0.002
   const entryPrice = candle.close
   const slPrice = direction === 'high'
@@ -193,7 +241,6 @@ function buildSweepEvent(
     ? entryPrice - risk * 3
     : entryPrice + risk * 3
 
-  // Résultat dans les 15 bougies suivantes (plus large pour 3R)
   let outcome: 'win' | 'loss' | 'breakeven' = 'breakeven'
   let rMultiple = 0
   let barsToClose = 0
@@ -201,7 +248,6 @@ function buildSweepEvent(
   for (let j = i + 1; j < Math.min(i + 16, bars.length); j++) {
     const b = bars[j]
     barsToClose = j - i
-
     if (direction === 'high') {
       if (b.low <= tpPrice) { outcome = 'win'; rMultiple = 3; break }
       if (b.high >= slPrice) { outcome = 'loss'; rMultiple = -1; break }
@@ -221,6 +267,10 @@ function buildSweepEvent(
     oiExpanded,
     fundingAtSweep,
     fundingExtreme,
+    fundingAligned,
+    session,
+    htfContext,
+    sweepAge,
     score,
     scoreL,
     scoreF,
@@ -236,17 +286,16 @@ function buildSweepEvent(
   }
 }
 
-// ─── STATS HELPERS ────────────────────────────────────────────────────────────
+// ─── STATS ───────────────────────────────────────────────────────────────────
 
-function calcStats(sweeps: SweepEvent[]) {
+function calcStats(sweeps: SweepEvent[]): StatBlock {
   const closed = sweeps.filter(s => s.outcome !== 'breakeven')
   const wins = closed.filter(s => s.outcome === 'win')
   const avgR = closed.length > 0
     ? closed.reduce((s, t) => s + t.rMultiple, 0) / closed.length
     : 0
   const winRate = closed.length > 0 ? wins.length / closed.length : 0
-  const expectancy = winRate * 2 - (1 - winRate) * 1
-
+  const expectancy = winRate * 3 - (1 - winRate) * 1
   return {
     trades: closed.length,
     wins: wins.length,
@@ -256,29 +305,20 @@ function calcStats(sweeps: SweepEvent[]) {
   }
 }
 
-// ─── POIDS SUGGÉRÉS ───────────────────────────────────────────────────────────
-
 function suggestWeights(sweeps: SweepEvent[]) {
-  // Pour chaque critère, calculer le lift de win rate quand il est présent
   const base = calcStats(sweeps).winRate / 100
-
-  const withL = calcStats(sweeps.filter(s => s.scoreL > 0)).winRate / 100
-  const withFOI = calcStats(sweeps.filter(s => s.oiExpanded)).winRate / 100
-  const withFCVD = calcStats(sweeps.filter(s =>
-    (s.direction === 'high' && s.cvdDirection === 'bearish') ||
-    (s.direction === 'low' && s.cvdDirection === 'bullish')
-  )).winRate / 100
-  const withRVwap = calcStats(sweeps.filter(s => s.scoreR >= 1)).winRate / 100
-  const withRStruct = calcStats(sweeps.filter(s => s.scoreR >= 2)).winRate / 100
-
   const lift = (v: number) => Math.max(0, Math.round((v - base) * 100) / 100)
 
   return {
-    L: lift(withL),
-    F_oi: lift(withFOI),
-    F_cvd: lift(withFCVD),
-    R_vwap: lift(withRVwap),
-    R_structure: lift(withRStruct),
+    L: lift(calcStats(sweeps.filter(s => s.scoreL > 0)).winRate / 100),
+    F_oi: 0,
+    F_cvd: lift(calcStats(sweeps.filter(s =>
+      (s.direction === 'high' && s.cvdDirection === 'bearish') ||
+      (s.direction === 'low' && s.cvdDirection === 'bullish')
+    )).winRate / 100),
+    F_funding: lift(calcStats(sweeps.filter(s => s.fundingAligned)).winRate / 100),
+    R_vwap: lift(calcStats(sweeps.filter(s => s.scoreR >= 2)).winRate / 100),
+    R_structure: lift(calcStats(sweeps.filter(s => s.scoreR >= 3)).winRate / 100),
   }
 }
 
@@ -288,21 +328,20 @@ export async function GET() {
   try {
     if (!fs.existsSync(HISTORY_FILE)) {
       return NextResponse.json(
-        { error: 'Données historiques manquantes. Lance /api/backtest/collect d\'abord.' },
+        { error: 'Données manquantes. Lance /api/backtest/collect d\'abord.' },
         { status: 400 }
       )
     }
 
     const raw = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8')) as RawBar[]
 
-    // Détecter tous les sweeps
     const allSweeps: SweepEvent[] = []
-    for (let i = 10; i < raw.length - 10; i++) {
+    for (let i = 10; i < raw.length - 15; i++) {
       const sweep = detectSweep(raw, i)
       if (sweep) allSweeps.push(sweep)
     }
 
-    // Filtrer les doublons (même direction dans les 3 bougies suivantes)
+    // Dédupliquer
     const filtered: SweepEvent[] = []
     for (const s of allSweeps) {
       const last = filtered.at(-1)
@@ -311,29 +350,50 @@ export async function GET() {
       }
     }
 
-    // Calculer stats par segment
-    const L_only = filtered
     const LF = filtered.filter(s => s.scoreF >= 1)
     const LFR_full = filtered.filter(s => s.score >= 4)
 
-    // Par score
     const byScore: BacktestResults['byScore'] = {}
     for (let sc = 1; sc <= 5; sc++) {
-      const group = filtered.filter(s => s.score === sc)
-      byScore[sc] = calcStats(group)
+      byScore[sc] = calcStats(filtered.filter(s => s.score === sc))
     }
 
-    // Funding filter
-    const withExtreme = filtered.filter(s => s.fundingExtreme)
-    const withoutExtreme = filtered.filter(s => !s.fundingExtreme)
+    // Amélioration 1 — Par session
+    const bySession: BacktestResults['bySession'] = {
+      Asia: calcStats(filtered.filter(s => s.session === 'Asia')),
+      London: calcStats(filtered.filter(s => s.session === 'London')),
+      NewYork: calcStats(filtered.filter(s => s.session === 'NewYork')),
+      Overlap: calcStats(filtered.filter(s => s.session === 'Overlap')),
+    }
 
-    // OI filter
-    const withExpansion = filtered.filter(s => s.oiExpanded)
-    const withoutExpansion = filtered.filter(s => !s.oiExpanded)
+    // Amélioration 2 — Funding directionnel
+    const fundingFilter: BacktestResults['fundingFilter'] = {
+      aligned: calcStats(filtered.filter(s => s.fundingAligned)),
+      neutral: calcStats(filtered.filter(s => !s.fundingAligned && !s.fundingExtreme)),
+      counter: calcStats(filtered.filter(s => s.fundingExtreme && !s.fundingAligned)),
+    }
 
-    // Distribution R
-    const buckets = ['-2R', '-1R', '0R', '+1R', '+2R', '+3R']
-    const rDistribution = buckets.map(bucket => {
+    // Amélioration 3 — HTF context
+    const byHTFContext: BacktestResults['byHTFContext'] = {
+      trend_aligned: calcStats(filtered.filter(s => s.htfContext === 'trend_aligned')),
+      range: calcStats(filtered.filter(s => s.htfContext === 'range')),
+      counter_trend: calcStats(filtered.filter(s => s.htfContext === 'counter_trend')),
+    }
+
+    // Amélioration 4 — Age du sweep
+    const bySweepAge: BacktestResults['bySweepAge'] = {
+      fresh: calcStats(filtered.filter(s => s.sweepAge === 'fresh')),
+      recent: calcStats(filtered.filter(s => s.sweepAge === 'recent')),
+      old: calcStats(filtered.filter(s => s.sweepAge === 'old')),
+    }
+
+    // OI filtre
+    const oiFilter = {
+      withExpansion: calcStats(filtered.filter(s => s.oiExpanded)),
+      withoutExpansion: calcStats(filtered.filter(s => !s.oiExpanded)),
+    }
+
+    const rDistribution = ['-2R', '-1R', '0R', '+1R', '+2R', '+3R'].map(bucket => {
       let count = 0
       if (bucket === '-2R') count = filtered.filter(s => s.rMultiple <= -2).length
       else if (bucket === '-1R') count = filtered.filter(s => s.rMultiple > -2 && s.rMultiple <= -0.5).length
@@ -348,25 +408,21 @@ export async function GET() {
       generatedAt: new Date().toISOString(),
       totalBars: raw.length,
       totalSweeps: filtered.length,
-      L: calcStats(L_only),
+      L: calcStats(filtered),
       LF: calcStats(LF),
       LFR: calcStats(LFR_full),
       byScore,
-      fundingFilter: {
-        withExtreme: calcStats(withExtreme),
-        withoutExtreme: calcStats(withoutExtreme),
-      },
-      oiFilter: {
-        withExpansion: calcStats(withExpansion),
-        withoutExpansion: calcStats(withoutExpansion),
-      },
+      fundingFilter,
+      oiFilter,
+      bySession,
+      byHTFContext,
+      bySweepAge,
       rDistribution,
       suggestedWeights: suggestWeights(filtered),
-      sweeps: filtered.slice(-50), // derniers 50 pour l'UI
+      sweeps: filtered.slice(-50),
     }
 
     fs.writeFileSync(RESULTS_FILE, JSON.stringify(results, null, 2), 'utf-8')
-
     return NextResponse.json(results)
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Erreur backtest'
