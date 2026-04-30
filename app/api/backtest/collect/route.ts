@@ -6,7 +6,7 @@ export const dynamic = 'force-dynamic'
 
 const BYBIT = 'https://api.bybit.com'
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '/data'
-const TARGET_BARS = 17520
+const TARGET_BARS = 70080
 const BARS_PER_CALL = 200
 
 type RawBar = {
@@ -35,7 +35,7 @@ async function fetchKlinesPaginated(symbol: string): Promise<KlineRaw[]> {
   let callCount = 0
 
   while (allBars.length < TARGET_BARS && callCount < maxCalls) {
-    const url = `${BYBIT}/v5/market/kline?category=linear&symbol=${symbol}&interval=60&limit=${BARS_PER_CALL}&end=${endTime}`
+    const url = `${BYBIT}/v5/market/kline?category=linear&symbol=${symbol}&interval=15&limit=${BARS_PER_CALL}&end=${endTime}`
     const res = await fetch(url, { cache: 'no-store' })
     const data = await res.json()
 
@@ -55,7 +55,7 @@ async function fetchKlinesPaginated(symbol: string): Promise<KlineRaw[]> {
     if (!oldest) break
     endTime = oldest.time * 1000 - 1
     callCount++
-    await new Promise(r => setTimeout(r, 200))
+    await new Promise(r => setTimeout(r, 300))
   }
 
   const seen = new Set<number>()
@@ -74,7 +74,7 @@ async function fetchOIPaginated(symbol: string): Promise<{ time: number; oi: num
   let callCount = 0
 
   while (allOI.length < TARGET_BARS && callCount < maxCalls) {
-    const url = `${BYBIT}/v5/market/open-interest?category=linear&symbol=${symbol}&intervalTime=1h&limit=${BARS_PER_CALL}&endTime=${endTime}`
+    const url = `${BYBIT}/v5/market/open-interest?category=linear&symbol=${symbol}&intervalTime=15min&limit=${BARS_PER_CALL}&endTime=${endTime}`
     try {
       const res = await fetch(url, { cache: 'no-store' })
       const data = await res.json()
@@ -90,7 +90,7 @@ async function fetchOIPaginated(symbol: string): Promise<{ time: number; oi: num
       if (!oldest) break
       endTime = oldest.time * 1000 - 1
       callCount++
-      await new Promise(r => setTimeout(r, 200))
+      await new Promise(r => setTimeout(r, 300))
     } catch { break }
   }
 
@@ -124,7 +124,7 @@ async function fetchFundingPaginated(symbol: string): Promise<{ time: number; ra
       if (!oldest) break
       endTime = oldest.time * 1000 - 1
       callCount++
-      await new Promise(r => setTimeout(r, 200))
+      await new Promise(r => setTimeout(r, 300))
     } catch { break }
   }
 
@@ -200,7 +200,7 @@ export async function GET(req: Request) {
     fs.writeFileSync(HISTORY_FILE, JSON.stringify(merged, null, 2), 'utf-8')
 
     return NextResponse.json({
-      message: `${merged.length} bougies 1h ${symbol} collectées`,
+      message: `${merged.length} bougies 15m ${symbol} collectées`,
       symbol,
       bars: merged.length,
       from: new Date((merged[0]?.time ?? 0) * 1000).toISOString(),
