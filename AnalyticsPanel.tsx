@@ -1,282 +1,161 @@
 'use client'
 
-import { useAnalytics, type AnalyticsRow } from './useAnalytics'
-import HeatmapPanel from './HeatmapPanel'
+import { useMarketStore } from './useMarketStore'
 
-function Table({
-  title,
-  rows,
-}: {
-  title: string
-  rows: AnalyticsRow[]
-}) {
-  return (
-    <div
-      style={{
-        background: 'var(--bg-card)',
-        border: '1px solid var(--bg-border)',
-        borderRadius: 12,
-        padding: 14,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 10,
-      }}
-    >
-      <div
-        style={{
-          fontSize: 11,
-          fontFamily: 'monospace',
-          color: 'var(--text-muted)',
-          textTransform: 'uppercase',
-          letterSpacing: '0.1em',
-        }}
-      >
-        {title}
-      </div>
+type SlotKey = 'BTC-1h' | 'BTC-15m' | 'ETH-1h' | 'ETH-15m'
 
-      <div style={{ overflowX: 'auto' }}>
-        <table
-          style={{
-            width: '100%',
-            borderCollapse: 'collapse',
-            fontSize: 12,
-            fontFamily: 'monospace',
-          }}
-        >
-          <thead>
-            <tr style={{ borderBottom: '1px solid var(--bg-border)' }}>
-              {['Label', 'Trades', 'WR', 'R', 'Exp', 'PF'].map((h) => (
-                <th
-                  key={h}
-                  style={{
-                    textAlign: 'left',
-                    padding: '0 12px 8px 0',
-                    color: 'var(--text-muted)',
-                    fontWeight: 500,
-                  }}
-                >
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr
-                key={r.label}
-                style={{ borderBottom: '1px solid var(--bg-border)' }}
-              >
-                <td style={{ padding: '8px 12px 8px 0' }}>{r.label}</td>
-                <td style={{ paddingRight: 12 }}>{r.trades}</td>
-                <td style={{ paddingRight: 12 }}>{(r.winrate ?? 0).toFixed(1)}%</td>
-                <td style={{ paddingRight: 12 }}>{(r.rTotal ?? 0).toFixed(2)}</td>
-                <td style={{ paddingRight: 12 }}>{(r.expectancy ?? 0).toFixed(3)}</td>
-                <td style={{ paddingRight: 12 }}>{(r.profitFactor ?? 0).toFixed(2)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  )
+const SLOT_COLOR: Record<SlotKey, string> = {
+  'BTC-1h':  '#f7931a',
+  'ETH-1h':  '#627eea',
+  'BTC-15m': '#f7931a',
+  'ETH-15m': '#627eea',
+}
+
+function colorWR(wr: number) {
+  if (wr >= 70) return 'var(--accent-green)'
+  if (wr >= 50) return 'var(--accent-yellow)'
+  return 'var(--accent-red)'
+}
+
+function colorAction(action: string) {
+  if (action === 'BUY') return 'var(--accent-green)'
+  if (action === 'SELL') return 'var(--accent-red)'
+  return 'var(--text-muted)'
 }
 
 export default function AnalyticsPanel() {
-  const { analytics, loading, error } = useAnalytics()
+  const { slotSignals, allPositions, slotStats, activeSweeps, setupStats, sessionStats } = useMarketStore()
 
-  if (loading) {
-    return (
-      <div
-        style={{
-          background: 'var(--bg-card)',
-          border: '1px solid var(--bg-border)',
-          borderRadius: 12,
-          padding: 16,
-        }}
-      >
-        Chargement analytics...
-      </div>
-    )
-  }
-
-  if (error || !analytics) {
-    return (
-      <div
-        style={{
-          background: 'var(--bg-card)',
-          border: '1px solid var(--bg-border)',
-          borderRadius: 12,
-          padding: 16,
-          color: 'var(--accent-red)',
-        }}
-      >
-        ⚠ {error || 'No analytics'}
-      </div>
-    )
-  }
-
-  const overview = analytics.overview
+  const slots: SlotKey[] = ['BTC-1h', 'ETH-1h', 'BTC-15m', 'ETH-15m']
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: 12,
-          flexWrap: 'wrap',
-        }}
-      >
-        <div
-          style={{
-            fontSize: 11,
-            fontFamily: 'monospace',
-            color: 'var(--text-muted)',
-            textTransform: 'uppercase',
-            letterSpacing: '0.1em',
-          }}
-        >
-          Analytics
+
+      {/* 4 Slots */}
+      <div style={{ background: 'var(--bg-card)', border: '1px solid var(--bg-border)', borderRadius: 12, padding: 16 }}>
+        <div style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 16 }}>
+          Slots LFR — BTC · ETH · 1h · 15m
         </div>
 
-        <a
-          href="/api/analytics/export"
-          style={{
-            textDecoration: 'none',
-            border: '1px solid var(--bg-border)',
-            background: 'var(--bg-card)',
-            color: 'var(--text-secondary)',
-            borderRadius: 8,
-            padding: '8px 12px',
-            fontFamily: 'monospace',
-            fontSize: 12,
-          }}
-        >
-          Export CSV
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+          {slots.map(slot => {
+            const signal = slotSignals?.[slot]
+            const position = allPositions?.[slot]
+            const stats = slotStats?.[slot]
+            const sweep = activeSweeps?.[slot]
+            const color = SLOT_COLOR[slot]
+            const tf = slot.includes('1h') ? '1H' : '15M'
+
+            return (
+              <div key={slot} style={{ background: 'var(--bg-primary)', border: `1px solid ${color}44`, borderRadius: 10, padding: 12 }}>
+
+                {/* Header */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                  <div style={{ fontFamily: 'monospace', fontWeight: 800, fontSize: 13, color }}>{slot.replace('-', ' ')}</div>
+                  <div style={{ fontSize: 10, background: `${color}22`, color, padding: '2px 6px', borderRadius: 4, fontFamily: 'monospace' }}>{tf}</div>
+                </div>
+
+                {/* Signal */}
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 3 }}>SIGNAL</div>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: colorAction(signal?.action ?? 'STABLE') }}>
+                    {signal?.action ?? '—'}
+                    {signal?.score ? <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-muted)', marginLeft: 4 }}>{signal.score}/5</span> : null}
+                  </div>
+                </div>
+
+                {/* Sweep actif */}
+                {sweep && (
+                  <div style={{ marginBottom: 8, padding: '4px 8px', background: 'rgba(255,211,75,0.08)', borderRadius: 6, border: '1px solid rgba(255,211,75,0.2)' }}>
+                    <div style={{ fontSize: 10, color: 'var(--accent-yellow)', fontFamily: 'monospace' }}>
+                      SWEEP {sweep.direction.toUpperCase()} — {sweep.ageMinutes}min
+                    </div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{sweep.structureLevel?.toFixed(0)}</div>
+                  </div>
+                )}
+
+                {/* Position ouverte */}
+                {position ? (
+                  <div style={{ marginBottom: 8, padding: '4px 8px', background: 'rgba(0,212,168,0.08)', borderRadius: 6, border: '1px solid rgba(0,212,168,0.2)' }}>
+                    <div style={{ fontSize: 10, color: 'var(--accent-green)', fontFamily: 'monospace' }}>
+                      {position.action} @ {position.entryPrice?.toFixed(0)}
+                    </div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                      SL {position.stopLoss?.toFixed(0)} · TP {position.takeProfit?.toFixed(0)}
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 8 }}>Pas de position</div>
+                )}
+
+                {/* Stats */}
+                {stats && stats.total > 0 && (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 10 }}>
+                    <div style={{ color: 'var(--text-muted)' }}>Trades</div>
+                    <div style={{ fontWeight: 700 }}>{stats.total}</div>
+                    <div style={{ color: 'var(--text-muted)' }}>Win Rate</div>
+                    <div style={{ fontWeight: 700, color: colorWR(stats.winrate) }}>{(stats.winrate ?? 0).toFixed(1)}%</div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Stats globales */}
+      {setupStats && (
+        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--bg-border)', borderRadius: 12, padding: 16 }}>
+          <div style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>
+            Performance globale
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+            {[
+              { label: 'Trades', value: setupStats.total },
+              { label: 'Wins', value: setupStats.wins },
+              { label: 'Losses', value: setupStats.losses },
+              { label: 'Win Rate', value: `${(setupStats.winrate ?? 0).toFixed(1)}%`, color: colorWR(setupStats.winrate ?? 0) },
+            ].map(({ label, value, color }) => (
+              <div key={label} style={{ textAlign: 'center', padding: '10px 0', background: 'var(--bg-primary)', borderRadius: 8 }}>
+                <div style={{ fontSize: 18, fontWeight: 800, color: color ?? 'var(--text-primary)' }}>{value}</div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4, fontFamily: 'monospace', textTransform: 'uppercase' }}>{label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Par session */}
+      {sessionStats && sessionStats.length > 0 && (
+        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--bg-border)', borderRadius: 12, padding: 16 }}>
+          <div style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>
+            Par session
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {sessionStats.map((s: { session: string; total: number; winrate: number }) => (
+              <div key={s.session} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'var(--bg-primary)', borderRadius: 8 }}>
+                <span style={{ fontSize: 13, fontFamily: 'monospace' }}>{s.session}</span>
+                <div style={{ display: 'flex', gap: 16, fontSize: 12, fontFamily: 'monospace' }}>
+                  <span style={{ color: 'var(--text-muted)' }}>{s.total} trades</span>
+                  <span style={{ color: colorWR(s.winrate ?? 0), fontWeight: 700 }}>{(s.winrate ?? 0).toFixed(1)}%</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Liens backtest */}
+      <div style={{ display: 'flex', gap: 12 }}>
+        <a href="/backtest" style={{ flex: 1, textAlign: 'center', padding: '10px', borderRadius: 8, border: '1px solid var(--bg-border)', background: 'var(--bg-primary)', color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: 12, textDecoration: 'none' }}>
+          📊 Backtest simple
+        </a>
+        <a href="/backtest/combined" style={{ flex: 1, textAlign: 'center', padding: '10px', borderRadius: 8, border: '1px solid var(--bg-border)', background: 'var(--bg-primary)', color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: 12, textDecoration: 'none' }}>
+          📊 Backtest combiné
         </a>
       </div>
 
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(6, minmax(0, 1fr))',
-          gap: 12,
-        }}
-      >
-        {[
-          ['Trades', overview.trades],
-          ['WR', `${(overview.winrate ?? 0).toFixed(1)}%`],
-          ['R Total', (overview.rTotal ?? 0).toFixed(2)],
-          ['Expectancy', (overview.expectancy ?? 0).toFixed(3)],
-          ['PF', (overview.profitFactor ?? 0).toFixed(2)],
-          ['Avg DD', (overview.avgDrawdownR ?? 0).toFixed(2)],
-        ].map(([label, value]) => (
-          <div
-            key={label}
-            style={{
-              background: 'var(--bg-card)',
-              border: '1px solid var(--bg-border)',
-              borderRadius: 12,
-              padding: 14,
-            }}
-          >
-            <div
-              style={{
-                fontSize: 11,
-                fontFamily: 'monospace',
-                color: 'var(--text-muted)',
-                marginBottom: 8,
-                textTransform: 'uppercase',
-              }}
-            >
-              {label}
-            </div>
-            <div style={{ fontSize: 16, fontWeight: 700 }}>{value}</div>
-          </div>
-        ))}
-      </div>
-
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: '1fr 1fr',
-          gap: 16,
-        }}
-      >
-        <Table title="By Session" rows={analytics.bySession} />
-        <Table title="By Hour" rows={analytics.byHour} />
-        <Table title="By Timeframe" rows={analytics.byTimeframe} />
-        <Table title="By Direction" rows={analytics.byDirection} />
-      </div>
-
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: '1fr 1fr',
-          gap: 16,
-        }}
-      >
-        <div
-          style={{
-            background: 'var(--bg-card)',
-            border: '1px solid var(--bg-border)',
-            borderRadius: 12,
-            padding: 14,
-          }}
-        >
-          <div
-            style={{
-              fontSize: 11,
-              fontFamily: 'monospace',
-              color: 'var(--text-muted)',
-              marginBottom: 10,
-              textTransform: 'uppercase',
-            }}
-          >
-            Streaks
-          </div>
-
-          <div
-            style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}
-          >
-            <div>Max Win Streak: {analytics.streaks.maxWinStreak}</div>
-            <div>Max Loss Streak: {analytics.streaks.maxLossStreak}</div>
-            <div>Current Win Streak: {analytics.streaks.currentWinStreak}</div>
-            <div>Current Loss Streak: {analytics.streaks.currentLossStreak}</div>
-          </div>
-        </div>
-
-        <div
-          style={{
-            background: 'var(--bg-card)',
-            border: '1px solid var(--bg-border)',
-            borderRadius: 12,
-            padding: 14,
-          }}
-        >
-          <div
-            style={{
-              fontSize: 11,
-              fontFamily: 'monospace',
-              color: 'var(--text-muted)',
-              marginBottom: 10,
-              textTransform: 'uppercase',
-            }}
-          >
-            Drawdown
-          </div>
-
-          <div
-            style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}
-          >
-            <div>Max DD: {(analytics.drawdown.maxDrawdownR ?? 0).toFixed(2)}R</div>
-            <div>Current DD: {(analytics.drawdown.currentDrawdownR ?? 0).toFixed(2)}R</div>
-          </div>
-        </div>
-      </div>
-
-      <HeatmapPanel heatmap={analytics.heatmap} />
     </div>
   )
 }
+
