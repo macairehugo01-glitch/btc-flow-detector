@@ -1,7 +1,10 @@
 import { loadJournalFile, saveJournalFile } from './journalPersistence'
 import { sendTelegramMessage } from './lib/telegram'
 
+// ─── TYPES ───────────────────────────────────────────────────────────────────
+
 type SetupStatus = 'open' | 'win' | 'loss'
+export type SlotKey = 'BTC-1h' | 'BTC-15m' | 'ETH-1h' | 'ETH-15m'
 export type SessionName = 'Asia' | 'London' | 'New York'
 export type Timeframe = '1m' | '5m' | '15m' | '1h'
 
@@ -23,41 +26,36 @@ export type VWAPSide = 'above' | 'below'
 
 export type StoredSetup = {
   id: string
-
+  slot: SlotKey
   timestamp: number
   closedAt?: number
-
   session: SessionName
   weekday: 'Mon' | 'Tue' | 'Wed' | 'Thu' | 'Fri' | 'Sat' | 'Sun'
   hourBucket: string
-
   timeframe: Timeframe
   action: 'BUY' | 'SELL'
   confidence: number
-
   signalType: SignalType
   marketRegime: MarketRegime
   vwapSide: VWAPSide
   vwapDistancePct: number
   volatilityBucket: VolatilityBucket
-
   entryPrice: number
   stopLoss: number
   takeProfit: number
   rr: number
   riskPercent: number
-
   status: SetupStatus
   exitPrice?: number
   rMultiple?: number
   drawdownR?: number
   durationMinutes?: number
-
   referenceBarKey: string
 }
 
-type LivePosition = {
+export type LivePosition = {
   setupId: string
+  slot: SlotKey
   action: 'BUY' | 'SELL'
   entryPrice: number
   stopLoss: number
@@ -85,29 +83,62 @@ export type SessionStats = {
   winrate: number
 }
 
+// ─── ÉTAT PERSISTÉ ────────────────────────────────────────────────────────────
+
+type SlotState = {
+  position: LivePosition
+  lastLossTimestamp: number | null
+  lastReferenceBarKey: string | null
+}
+
 type PersistedState = {
   setups: StoredSetup[]
-  currentPosition: LivePosition
-  lastReverseBarKey: string | null
-  lastLossTimestamp: number | null
+  // Ancien format (migration)
+  currentPosition?: LivePosition
+  lastLossTimestamp?: number | null
+  lastReverseBarKey?: string | null
+  // Nouveau format 4 slots
+  slots: Record<SlotKey, SlotState>
+}
+
+const ALL_SLOTS: SlotKey[] = ['BTC-1h', 'BTC-15m', 'ETH-1h', 'ETH-15m']
+
+const DEFAULT_SLOT: SlotState = {
+  position: null,
+  lastLossTimestamp: null,
+  lastReferenceBarKey: null,
 }
 
 const initialState: PersistedState = {
   setups: [],
-  currentPosition: null,
-  lastReverseBarKey: null,
-  lastLossTimestamp: null,
+  slots: {
+    'BTC-1h':  { ...DEFAULT_SLOT },
+    'BTC-15m': { ...DEFAULT_SLOT },
+    'ETH-1h':  { ...DEFAULT_SLOT },
+    'ETH-15m': { ...DEFAULT_SLOT },
+  },
 }
 
 const state = loadJournalFile<PersistedState>(initialState)
 
-if (state.lastLossTimestamp === undefined) {
-  state.lastLossTimestamp = null
+// ── Migration depuis l'ancien format ──
+if (!state.slots) {
+  state.slots = {
+    'BTC-1h':  { position: state.currentPosition ?? null, lastLossTimestamp: state.lastLossTimestamp ?? null, lastReferenceBarKey: state.lastReverseBarKey ?? null },
+    'BTC-15m': { ...DEFAULT_SLOT },
+    'ETH-1h':  { ...DEFAULT_SLOT },
+    'ETH-15m': { ...DEFAULT_SLOT },
+  }
+}
+for (const slot of ALL_SLOTS) {
+  if (!state.slots[slot]) state.slots[slot] = { ...DEFAULT_SLOT }
 }
 
 function persist() {
   saveJournalFile(state)
 }
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
 
 function sessionFromTimestamp(tsMs: number): SessionName {
   const hour = new Date(tsMs).getUTCHours()
@@ -122,31 +153,24 @@ function weekdayFromTimestamp(tsMs: number): StoredSetup['weekday'] {
 }
 
 function hourBucketFromTimestamp(tsMs: number) {
-  const d = new Date(tsMs)
-  const h = d.getUTCHours()
+  const h = new Date(tsMs).getUTCHours()
   const next = (h + 1) % 24
   return `${String(h).padStart(2, '0')}:00-${String(next).padStart(2, '0')}:00`
 }
 
-function buildRiskLevels(
-  entryPrice: number,
-  action: 'BUY' | 'SELL',
-  vwap: number
-) {
+function buildRiskLevels(entryPrice: number, action: 'BUY' | 'SELL', vwap: number) {
   const VWAP_BUFFER = 0.0015
-  const RR = 2
+  const RR = 3 // TP 3R — validé par backtest
 
-  const stopLoss =
-    action === 'BUY'
-      ? vwap * (1 - VWAP_BUFFER)
-      : vwap * (1 + VWAP_BUFFER)
+  const stopLoss = action === 'BUY'
+    ? vwap * (1 - VWAP_BUFFER)
+    : vwap * (1 + VWAP_BUFFER)
 
   const riskMove = Math.abs(entryPrice - stopLoss)
 
-  const takeProfit =
-    action === 'BUY'
-      ? entryPrice + riskMove * RR
-      : entryPrice - riskMove * RR
+  const takeProfit = action === 'BUY'
+    ? entryPrice + riskMove * RR
+    : entryPrice - riskMove * RR
 
   return { stopLoss, takeProfit, rr: RR }
 }
@@ -162,21 +186,21 @@ function escapeMarkdown(text: string): string {
   return text.replace(/_/g, '\\_').replace(/\*/g, '\\*').replace(/\[/g, '\\[')
 }
 
+// ─── NOTIFICATIONS ───────────────────────────────────────────────────────────
+
 async function notifyOpen(setup: StoredSetup) {
   try {
     await sendTelegramMessage(
-`📈 *NEW TRADE*
+`📈 *NEW TRADE — ${setup.slot}*
 
 ${setup.action} ${setup.timeframe}
 
 Price: ${setup.entryPrice}
-SL: ${setup.stopLoss.toFixed(2)} (VWAP ±0.15%)
-TP: ${setup.takeProfit.toFixed(2)}
-RR: ${setup.rr}
+SL: ${setup.stopLoss.toFixed(2)}
+TP: ${setup.takeProfit.toFixed(2)} (${setup.rr}R)
 
 Confidence: ${setup.confidence}/5
 Type: ${escapeMarkdown(setup.signalType)}
-
 VWAP dist: ${setup.vwapDistancePct.toFixed(3)}%
 Session: ${setup.session}`
     )
@@ -188,11 +212,10 @@ Session: ${setup.session}`
 async function notifyClose(setup: StoredSetup) {
   try {
     await sendTelegramMessage(
-`📉 *TRADE CLOSED*
+`📉 *TRADE CLOSED — ${setup.slot}*
 
 Result: ${setup.status.toUpperCase()}
 R: ${setup.rMultiple?.toFixed(2)}
-
 Duration: ${setup.durationMinutes?.toFixed(1)} min`
     )
   } catch (err) {
@@ -200,41 +223,93 @@ Duration: ${setup.durationMinutes?.toFixed(1)} min`
   }
 }
 
-export function getCurrentPosition() {
-  return state.currentPosition
+// ─── GETTERS ─────────────────────────────────────────────────────────────────
+
+export function getCurrentPosition(slot: SlotKey): LivePosition {
+  return state.slots[slot]?.position ?? null
 }
 
-export function getLastReverseBarKey() {
-  return state.lastReverseBarKey
+export function getAllPositions(): Record<SlotKey, LivePosition> {
+  const result = {} as Record<SlotKey, LivePosition>
+  for (const slot of ALL_SLOTS) result[slot] = state.slots[slot]?.position ?? null
+  return result
+}
+
+export function getLastReferenceBarKey(slot: SlotKey): string | null {
+  return state.slots[slot]?.lastReferenceBarKey ?? null
+}
+
+export function isInCooldown(slot: SlotKey): boolean {
+  const lastLoss = state.slots[slot]?.lastLossTimestamp
+  if (!lastLoss) return false
+  // 4h cooldown sur 1h, 1h sur 15m — validé par backtest
+  const cooldownMs = slot.includes('1h') ? 4 * 60 * 60 * 1000 : 60 * 60 * 1000
+  return Date.now() - lastLoss < cooldownMs
+}
+
+export function hasRecentDuplicate(slot: SlotKey, action: 'BUY' | 'SELL', timestamp: number): boolean {
+  return state.setups.some(
+    s => s.slot === slot && s.action === action && Math.abs(s.timestamp - timestamp) < 5 * 60 * 1000
+  )
+}
+
+export function getRecentSetups() {
+  return state.setups.slice(0, 50)
+}
+
+export function getStats(): SetupStats {
+  const wins = state.setups.filter(s => s.status === 'win').length
+  const losses = state.setups.filter(s => s.status === 'loss').length
+  const open = state.setups.filter(s => s.status === 'open').length
+  const totalClosed = wins + losses
+  return {
+    total: state.setups.length,
+    wins, losses, open,
+    winrate: totalClosed > 0 ? (wins / totalClosed) * 100 : 0,
+  }
+}
+
+export function getSlotStats(): Record<SlotKey, SetupStats> {
+  const result = {} as Record<SlotKey, SetupStats>
+  for (const slot of ALL_SLOTS) {
+    const slotSetups = state.setups.filter(s => s.slot === slot)
+    const wins = slotSetups.filter(s => s.status === 'win').length
+    const losses = slotSetups.filter(s => s.status === 'loss').length
+    const open = slotSetups.filter(s => s.status === 'open').length
+    const totalClosed = wins + losses
+    result[slot] = {
+      total: slotSetups.length,
+      wins, losses, open,
+      winrate: totalClosed > 0 ? (wins / totalClosed) * 100 : 0,
+    }
+  }
+  return result
+}
+
+export function getSessionStats(): SessionStats[] {
+  const sessions: SessionName[] = ['Asia', 'London', 'New York']
+  return sessions.map(session => {
+    const filtered = state.setups.filter(s => s.session === session)
+    const wins = filtered.filter(s => s.status === 'win').length
+    const losses = filtered.filter(s => s.status === 'loss').length
+    const open = filtered.filter(s => s.status === 'open').length
+    const totalClosed = wins + losses
+    return {
+      session, total: filtered.length,
+      wins, losses, open,
+      winrate: totalClosed > 0 ? (wins / totalClosed) * 100 : 0,
+    }
+  })
 }
 
 export function getTradeJournal() {
   return state.setups
 }
 
-export function isInCooldown(timeframe: Timeframe): boolean {
-  if (!state.lastLossTimestamp) return false
-  const cooldownMs = timeframe === '1m' ? 3 * 60 * 1000
-    : timeframe === '5m' ? 15 * 60 * 1000
-    : timeframe === '15m' ? 45 * 60 * 1000
-    : 3 * 60 * 60 * 1000
-  return Date.now() - state.lastLossTimestamp < cooldownMs
-}
-
-export function hasRecentDuplicate(
-  action: 'BUY' | 'SELL',
-  timeframe: Timeframe,
-  timestamp: number
-) {
-  return state.setups.some(
-    (s) =>
-      s.action === action &&
-      s.timeframe === timeframe &&
-      Math.abs(s.timestamp - timestamp) < 5 * 60 * 1000
-  )
-}
+// ─── ACTIONS ─────────────────────────────────────────────────────────────────
 
 export async function openPosition(input: {
+  slot: SlotKey
   timestamp: number
   timeframe: Timeframe
   action: 'BUY' | 'SELL'
@@ -247,14 +322,11 @@ export async function openPosition(input: {
   vwapDistancePct: number
   volatilityBucket: VolatilityBucket
 }) {
-  const { stopLoss, takeProfit, rr } = buildRiskLevels(
-    input.entryPrice,
-    input.action,
-    input.vwap
-  )
+  const { stopLoss, takeProfit, rr } = buildRiskLevels(input.entryPrice, input.action, input.vwap)
 
   const setup: StoredSetup = {
-    id: `${input.action}-${input.timeframe}-${input.timestamp}`,
+    id: `${input.slot}-${input.action}-${input.timestamp}`,
+    slot: input.slot,
     timestamp: input.timestamp,
     session: sessionFromTimestamp(input.timestamp),
     weekday: weekdayFromTimestamp(input.timestamp),
@@ -271,15 +343,16 @@ export async function openPosition(input: {
     stopLoss,
     takeProfit,
     rr,
-    riskPercent: 3,
+    riskPercent: 2,
     status: 'open',
     referenceBarKey: input.referenceBarKey,
   }
 
   state.setups.unshift(setup)
 
-  state.currentPosition = {
+  state.slots[input.slot].position = {
     setupId: setup.id,
+    slot: input.slot,
     action: setup.action,
     entryPrice: setup.entryPrice,
     stopLoss: setup.stopLoss,
@@ -295,15 +368,13 @@ export async function openPosition(input: {
   return setup
 }
 
-export async function closeCurrentPositionAtMarket(
-  timestamp: number,
-  exitPrice: number
-) {
-  if (!state.currentPosition) return
+export async function closePosition(slot: SlotKey, timestamp: number, exitPrice: number) {
+  const slotState = state.slots[slot]
+  if (!slotState?.position) return
 
-  const setup = state.setups.find((s) => s.id === state.currentPosition?.setupId)
+  const setup = state.setups.find(s => s.id === slotState.position?.setupId)
   if (!setup || setup.status !== 'open') {
-    state.currentPosition = null
+    slotState.position = null
     persist()
     return
   }
@@ -318,124 +389,54 @@ export async function closeCurrentPositionAtMarket(
   setup.status = realizedR >= 0 ? 'win' : 'loss'
 
   if (setup.status === 'loss') {
-    state.lastLossTimestamp = timestamp
+    slotState.lastLossTimestamp = timestamp
   }
 
-  state.currentPosition = null
+  slotState.position = null
   persist()
   await notifyClose(setup)
 }
 
-export async function reversePosition(input: {
-  timestamp: number
-  timeframe: Timeframe
-  action: 'BUY' | 'SELL'
-  confidence: number
-  entryPrice: number
-  vwap: number
-  referenceBarKey: string
-  signalType: SignalType
-  marketRegime: MarketRegime
-  vwapDistancePct: number
-  volatilityBucket: VolatilityBucket
-}) {
-  await closeCurrentPositionAtMarket(input.timestamp, input.entryPrice)
-  state.lastReverseBarKey = input.referenceBarKey
-  persist()
-  const result = await openPosition(input)
-  return result
-}
-
 export function evaluateOpenSetups(
-  klines: Array<{ time: number; high: number; low: number }>
+  klines: Array<{ time: number; high: number; low: number }>,
+  slot: SlotKey
 ) {
   let changed = false
 
-  for (const setup of state.setups) {
-    if (setup.status !== 'open') continue
+  const slotSetups = state.setups.filter(s => s.slot === slot && s.status === 'open')
 
-    const candlesAfterEntry = klines.filter(
-      (k) => k.time * 1000 >= setup.timestamp
-    )
+  for (const setup of slotSetups) {
+    const candlesAfterEntry = klines.filter(k => k.time * 1000 >= setup.timestamp)
 
     for (const candle of candlesAfterEntry) {
-      if (setup.action === 'BUY') {
-        const hitSl = candle.low <= setup.stopLoss
-        const hitTp = candle.high >= setup.takeProfit
+      const hitSl = setup.action === 'BUY'
+        ? candle.low <= setup.stopLoss
+        : candle.high >= setup.stopLoss
+      const hitTp = setup.action === 'BUY'
+        ? candle.high >= setup.takeProfit
+        : candle.low <= setup.takeProfit
 
-        if (hitSl || hitTp) {
-          setup.status = hitTp ? 'win' : 'loss'
-          setup.exitPrice = hitTp ? setup.takeProfit : setup.stopLoss
-          setup.rMultiple = hitTp ? setup.rr : -1
-          setup.drawdownR = hitTp ? 0 : 1
-          setup.closedAt = candle.time * 1000
-          setup.durationMinutes = Math.max(0, (setup.closedAt - setup.timestamp) / 1000 / 60)
-          if (state.currentPosition?.setupId === setup.id) state.currentPosition = null
-          if (setup.status === 'loss') state.lastLossTimestamp = setup.closedAt!
-          notifyClose(setup)
-          changed = true
-          break
-        }
-      } else {
-        const hitSl = candle.high >= setup.stopLoss
-        const hitTp = candle.low <= setup.takeProfit
+      if (hitSl || hitTp) {
+        setup.status = hitTp ? 'win' : 'loss'
+        setup.exitPrice = hitTp ? setup.takeProfit : setup.stopLoss
+        setup.rMultiple = hitTp ? setup.rr : -1
+        setup.drawdownR = hitTp ? 0 : 1
+        setup.closedAt = candle.time * 1000
+        setup.durationMinutes = Math.max(0, (setup.closedAt - setup.timestamp) / 1000 / 60)
 
-        if (hitSl || hitTp) {
-          setup.status = hitTp ? 'win' : 'loss'
-          setup.exitPrice = hitTp ? setup.takeProfit : setup.stopLoss
-          setup.rMultiple = hitTp ? setup.rr : -1
-          setup.drawdownR = hitTp ? 0 : 1
-          setup.closedAt = candle.time * 1000
-          setup.durationMinutes = Math.max(0, (setup.closedAt - setup.timestamp) / 1000 / 60)
-          if (state.currentPosition?.setupId === setup.id) state.currentPosition = null
-          if (setup.status === 'loss') state.lastLossTimestamp = setup.closedAt!
-          notifyClose(setup)
-          changed = true
-          break
+        if (state.slots[slot]?.position?.setupId === setup.id) {
+          state.slots[slot].position = null
         }
+        if (setup.status === 'loss') {
+          state.slots[slot].lastLossTimestamp = setup.closedAt
+        }
+
+        notifyClose(setup)
+        changed = true
+        break
       }
     }
   }
 
   if (changed) persist()
-}
-
-export function getRecentSetups() {
-  return state.setups.slice(0, 25)
-}
-
-export function getStats(): SetupStats {
-  const wins = state.setups.filter((s) => s.status === 'win').length
-  const losses = state.setups.filter((s) => s.status === 'loss').length
-  const open = state.setups.filter((s) => s.status === 'open').length
-  const totalClosed = wins + losses
-
-  return {
-    total: state.setups.length,
-    wins,
-    losses,
-    open,
-    winrate: totalClosed > 0 ? (wins / totalClosed) * 100 : 0,
-  }
-}
-
-export function getSessionStats(): SessionStats[] {
-  const sessions: SessionName[] = ['Asia', 'London', 'New York']
-
-  return sessions.map((session) => {
-    const filtered = state.setups.filter((s) => s.session === session)
-    const wins = filtered.filter((s) => s.status === 'win').length
-    const losses = filtered.filter((s) => s.status === 'loss').length
-    const open = filtered.filter((s) => s.status === 'open').length
-    const totalClosed = wins + losses
-
-    return {
-      session,
-      total: filtered.length,
-      wins,
-      losses,
-      open,
-      winrate: totalClosed > 0 ? (wins / totalClosed) * 100 : 0,
-    }
-  })
 }
