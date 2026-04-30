@@ -6,9 +6,6 @@ export const dynamic = 'force-dynamic'
 
 const BYBIT = 'https://api.bybit.com'
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '/data'
-const HISTORY_FILE = path.join(DATA_DIR, 'backtest-history.json')
-
-// 2 ans d'historique 1h = ~17520 bougies
 const TARGET_BARS = 17520
 const BARS_PER_CALL = 200
 
@@ -25,16 +22,20 @@ type RawBar = {
 
 type KlineRaw = Omit<RawBar, 'oi' | 'fundingRate'>
 
-// ─── KLINES paginées sur 2 ans ────────────────────────────────────────────────
+function getHistoryFile(symbol: string): string {
+  return path.join(DATA_DIR, `backtest-history-${symbol.toLowerCase()}.json`)
+}
 
-async function fetchKlines1hPaginated(): Promise<KlineRaw[]> {
+// ─── KLINES paginées ──────────────────────────────────────────────────────────
+
+async function fetchKlinesPaginated(symbol: string): Promise<KlineRaw[]> {
   const allBars: KlineRaw[] = []
   let endTime = Date.now()
   const maxCalls = Math.ceil(TARGET_BARS / BARS_PER_CALL)
   let callCount = 0
 
   while (allBars.length < TARGET_BARS && callCount < maxCalls) {
-    const url = `${BYBIT}/v5/market/kline?category=linear&symbol=BTCUSDT&interval=60&limit=${BARS_PER_CALL}&end=${endTime}`
+    const url = `${BYBIT}/v5/market/kline?category=linear&symbol=${symbol}&interval=60&limit=${BARS_PER_CALL}&end=${endTime}`
     const res = await fetch(url, { cache: 'no-store' })
     const data = await res.json()
 
@@ -50,12 +51,10 @@ async function fetchKlines1hPaginated(): Promise<KlineRaw[]> {
     }))
 
     allBars.unshift(...bars)
-
     const oldest = bars[0]
     if (!oldest) break
     endTime = oldest.time * 1000 - 1
     callCount++
-
     await new Promise(r => setTimeout(r, 200))
   }
 
@@ -66,20 +65,19 @@ async function fetchKlines1hPaginated(): Promise<KlineRaw[]> {
     .slice(-TARGET_BARS)
 }
 
-// ─── OI paginé sur 2 ans ──────────────────────────────────────────────────────
+// ─── OI paginé ───────────────────────────────────────────────────────────────
 
-async function fetchOI1hPaginated(): Promise<{ time: number; oi: number }[]> {
+async function fetchOIPaginated(symbol: string): Promise<{ time: number; oi: number }[]> {
   const allOI: { time: number; oi: number }[] = []
   let endTime = Date.now()
   const maxCalls = Math.ceil(TARGET_BARS / BARS_PER_CALL)
   let callCount = 0
 
   while (allOI.length < TARGET_BARS && callCount < maxCalls) {
-    const url = `${BYBIT}/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=1h&limit=${BARS_PER_CALL}&endTime=${endTime}`
+    const url = `${BYBIT}/v5/market/open-interest?category=linear&symbol=${symbol}&intervalTime=1h&limit=${BARS_PER_CALL}&endTime=${endTime}`
     try {
       const res = await fetch(url, { cache: 'no-store' })
       const data = await res.json()
-
       if (data.retCode !== 0 || !data.result?.list?.length) break
 
       const bars = [...data.result.list].reverse().map((d: { timestamp: string; openInterest: string }) => ({
@@ -88,16 +86,12 @@ async function fetchOI1hPaginated(): Promise<{ time: number; oi: number }[]> {
       }))
 
       allOI.unshift(...bars)
-
       const oldest = bars[0]
       if (!oldest) break
       endTime = oldest.time * 1000 - 1
       callCount++
-
       await new Promise(r => setTimeout(r, 200))
-    } catch {
-      break
-    }
+    } catch { break }
   }
 
   const seen = new Set<number>()
@@ -108,18 +102,16 @@ async function fetchOI1hPaginated(): Promise<{ time: number; oi: number }[]> {
 
 // ─── FUNDING paginé ───────────────────────────────────────────────────────────
 
-async function fetchFundingPaginated(): Promise<{ time: number; rate: number }[]> {
+async function fetchFundingPaginated(symbol: string): Promise<{ time: number; rate: number }[]> {
   const allFunding: { time: number; rate: number }[] = []
   let endTime = Date.now()
-  const maxCalls = 12
   let callCount = 0
 
-  while (callCount < maxCalls) {
-    const url = `${BYBIT}/v5/market/funding/history?category=linear&symbol=BTCUSDT&limit=${BARS_PER_CALL}&endTime=${endTime}`
+  while (callCount < 12) {
+    const url = `${BYBIT}/v5/market/funding/history?category=linear&symbol=${symbol}&limit=${BARS_PER_CALL}&endTime=${endTime}`
     try {
       const res = await fetch(url, { cache: 'no-store' })
       const data = await res.json()
-
       if (data.retCode !== 0 || !data.result?.list?.length) break
 
       const bars = [...data.result.list].reverse().map((d: { fundingRateTimestamp: string; fundingRate: string }) => ({
@@ -128,16 +120,12 @@ async function fetchFundingPaginated(): Promise<{ time: number; rate: number }[]
       }))
 
       allFunding.unshift(...bars)
-
       const oldest = bars[0]
       if (!oldest) break
       endTime = oldest.time * 1000 - 1
       callCount++
-
       await new Promise(r => setTimeout(r, 200))
-    } catch {
-      break
-    }
+    } catch { break }
   }
 
   const seen = new Set<number>()
@@ -159,13 +147,11 @@ function mergeData(
       if (o.time <= k.time) oi = o.oi
       else break
     }
-
     let fundingRate = 0
     for (const f of fundingData) {
       if (f.time <= k.time) fundingRate = f.rate
       else break
     }
-
     return { ...k, oi, fundingRate }
   })
 }
@@ -175,16 +161,26 @@ function mergeData(
 export async function GET(req: Request) {
   const url = new URL(req.url)
   const force = url.searchParams.get('force') === 'true'
+  const symbol = (url.searchParams.get('symbol') ?? 'BTCUSDT').toUpperCase()
+
+  // Valider le symbole
+  const allowed = ['BTCUSDT', 'ETHUSDT']
+  if (!allowed.includes(symbol)) {
+    return NextResponse.json({ error: `Symbole non supporté: ${symbol}. Utilise BTCUSDT ou ETHUSDT` }, { status: 400 })
+  }
+
+  const HISTORY_FILE = getHistoryFile(symbol)
 
   try {
-    // Cache 21h — la collecte 2 ans prend ~30s, inutile de refaire souvent
+    // Cache 24h par symbole
     if (!force && fs.existsSync(HISTORY_FILE)) {
       const stat = fs.statSync(HISTORY_FILE)
       const ageHours = (Date.now() - stat.mtimeMs) / 1000 / 3600
       if (ageHours < 24) {
         const existing = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8')) as RawBar[]
         return NextResponse.json({
-          message: 'Données déjà à jour (cache 21h)',
+          message: `Données ${symbol} déjà à jour (cache 24h)`,
+          symbol,
           bars: existing.length,
           from: new Date((existing[0]?.time ?? 0) * 1000).toISOString(),
           to: new Date((existing[existing.length - 1]?.time ?? 0) * 1000).toISOString(),
@@ -193,24 +189,19 @@ export async function GET(req: Request) {
       }
     }
 
-    console.log('[BACKTEST] Collecte 2 ans historique 1h...')
+    console.log(`[BACKTEST] Collecte 2 ans 1h pour ${symbol}...`)
 
-    const klines = await fetchKlines1hPaginated()
-    console.log(`[BACKTEST] Klines: ${klines.length}`)
-
-    const oiData = await fetchOI1hPaginated()
-    console.log(`[BACKTEST] OI: ${oiData.length}`)
-
-    const fundingData = await fetchFundingPaginated()
-    console.log(`[BACKTEST] Funding: ${fundingData.length}`)
-
+    const klines = await fetchKlinesPaginated(symbol)
+    const oiData = await fetchOIPaginated(symbol)
+    const fundingData = await fetchFundingPaginated(symbol)
     const merged = mergeData(klines, oiData, fundingData)
 
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
     fs.writeFileSync(HISTORY_FILE, JSON.stringify(merged, null, 2), 'utf-8')
 
     return NextResponse.json({
-      message: `${merged.length} bougies 1h collectées`,
+      message: `${merged.length} bougies 1h ${symbol} collectées`,
+      symbol,
       bars: merged.length,
       from: new Date((merged[0]?.time ?? 0) * 1000).toISOString(),
       to: new Date((merged[merged.length - 1]?.time ?? 0) * 1000).toISOString(),
