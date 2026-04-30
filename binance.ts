@@ -49,19 +49,13 @@ async function httpJson<T>(url: string): Promise<T> {
   return res.json() as Promise<T>
 }
 
-function mapTimeframeToBybit(tf: string): string {
-  switch (tf) {
-    case '1m': return '1'
-    case '5m': return '5'
-    case '15m': return '15'
-    case '1h': return '60'
-    default: return '5'
-  }
-}
+// ─── KLINES ──────────────────────────────────────────────────────────────────
 
-export async function fetchKlines(timeframe: string, limit: number): Promise<Kline[]> {
-  const interval = mapTimeframeToBybit(timeframe)
-
+export async function fetchKlines(
+  symbol: string,
+  interval: string,
+  limit: number = 200
+): Promise<Kline[]> {
   const data = await httpJson<{
     retCode: number
     retMsg: string
@@ -71,36 +65,33 @@ export async function fetchKlines(timeframe: string, limit: number): Promise<Kli
       list: string[][]
     }
   }>(
-    `${BYBIT}/v5/market/kline?category=linear&symbol=BTCUSDT&interval=${interval}&limit=${limit}`
+    `${BYBIT}/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${limit}`
   )
 
   if (data.retCode !== 0) {
     throw new Error(`Bybit klines error: ${data.retMsg}`)
   }
 
-  const klines = [...data.result.list].reverse().map((k) => {
+  return [...data.result.list].reverse().map((k) => {
     const open = Number(k[1])
     const high = Number(k[2])
     const low = Number(k[3])
     const close = Number(k[4])
     const volume = Number(k[5])
     const takerBuyVolume = close >= open ? volume * 0.6 : volume * 0.4
-
     return {
       time: Math.floor(Number(k[0]) / 1000),
-      open,
-      high,
-      low,
-      close,
-      volume,
-      takerBuyVolume,
+      open, high, low, close, volume, takerBuyVolume,
     }
   })
-
-  return klines
 }
 
-export async function fetchAggTrades(_limit: number): Promise<AggTrade[]> {
+// ─── AGG TRADES ──────────────────────────────────────────────────────────────
+
+export async function fetchAggTrades(
+  symbol: string = 'BTCUSDT',
+  _limit: number = 100
+): Promise<AggTrade[]> {
   try {
     const data = await httpJson<{
       retCode: number
@@ -116,42 +107,38 @@ export async function fetchAggTrades(_limit: number): Promise<AggTrade[]> {
         }[]
       }
     }>(
-      `${BYBIT}/v5/market/recent-trade?category=linear&symbol=BTCUSDT&limit=100`
+      `${BYBIT}/v5/market/recent-trade?category=linear&symbol=${symbol}&limit=100`
     )
 
     if (data.retCode !== 0) return []
 
-    return [...data.result.list]
-      .reverse()
-      .map((t) => ({
-        time: Number(t.time),
-        price: Number(t.price),
-        quantity: Number(t.size),
-        isBuyerMaker: t.side === 'Sell',
-      }))
+    return [...data.result.list].reverse().map((t) => ({
+      time: Number(t.time),
+      price: Number(t.price),
+      quantity: Number(t.size),
+      isBuyerMaker: t.side === 'Sell',
+    }))
   } catch {
     return []
   }
 }
 
-/**
- * OI snapshot actuel — utilise limit=1 sur la liste pour avoir le dernier point.
- * L'API Bybit retourne une liste même avec limit=1.
- */
-export async function fetchCurrentOI(): Promise<OIBar> {
+// ─── OI SNAPSHOT ─────────────────────────────────────────────────────────────
+
+export async function fetchCurrentOI(
+  symbol: string = 'BTCUSDT',
+  intervalTime: string = '5min'
+): Promise<OIBar> {
   const data = await httpJson<{
     retCode: number
     retMsg: string
     result: {
       symbol: string
       category: string
-      list: {
-        openInterest: string
-        timestamp: string
-      }[]
+      list: { openInterest: string; timestamp: string }[]
     }
   }>(
-    `${BYBIT}/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=5min&limit=1`
+    `${BYBIT}/v5/market/open-interest?category=linear&symbol=${symbol}&intervalTime=${intervalTime}&limit=1`
   )
 
   if (data.retCode !== 0 || !data.result?.list?.length) {
@@ -165,11 +152,13 @@ export async function fetchCurrentOI(): Promise<OIBar> {
   }
 }
 
-/**
- * Historique OI Bybit — jusqu'à 200 points.
- * intervalTime : 5min, 15min, 30min, 1h, 4h, 1d
- */
-export async function fetchOIHistory(period: string = '5min', limit: number = 200): Promise<OIBar[]> {
+// ─── OI HISTORIQUE ────────────────────────────────────────────────────────────
+
+export async function fetchOIHistory(
+  period: string = '5min',
+  limit: number = 200,
+  symbol: string = 'BTCUSDT'
+): Promise<OIBar[]> {
   try {
     const data = await httpJson<{
       retCode: number
@@ -177,33 +166,32 @@ export async function fetchOIHistory(period: string = '5min', limit: number = 20
       result: {
         symbol: string
         category: string
-        list: {
-          openInterest: string
-          timestamp: string
-        }[]
+        list: { openInterest: string; timestamp: string }[]
       }
     }>(
-      `${BYBIT}/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=${period}&limit=${limit}`
+      `${BYBIT}/v5/market/open-interest?category=linear&symbol=${symbol}&intervalTime=${period}&limit=${limit}`
     )
 
     if (data.retCode !== 0 || !data.result?.list?.length) {
       throw new Error(`Bybit OI history error: ${data.retMsg}`)
     }
 
-    return [...data.result.list]
-      .reverse()
-      .map((d) => ({
-        time: Math.floor(Number(d.timestamp) / 1000),
-        openInterest: Number(d.openInterest),
-      }))
+    return [...data.result.list].reverse().map((d) => ({
+      time: Math.floor(Number(d.timestamp) / 1000),
+      openInterest: Number(d.openInterest),
+    }))
   } catch (err) {
     console.error('[OI] fetchOIHistory failed:', err)
-    const current = await fetchCurrentOI()
+    const current = await fetchCurrentOI(symbol, period)
     return [current]
   }
 }
 
-export async function fetchTicker(): Promise<TickerData> {
+// ─── TICKER ───────────────────────────────────────────────────────────────────
+
+export async function fetchTicker(
+  symbol: string = 'BTCUSDT'
+): Promise<TickerData> {
   try {
     const data = await httpJson<{
       retCode: number
@@ -217,7 +205,7 @@ export async function fetchTicker(): Promise<TickerData> {
         }[]
       }
     }>(
-      `${BYBIT}/v5/market/tickers?category=linear&symbol=BTCUSDT`
+      `${BYBIT}/v5/market/tickers?category=linear&symbol=${symbol}`
     )
 
     if (data.retCode !== 0 || !data.result?.list?.length) {
@@ -231,21 +219,27 @@ export async function fetchTicker(): Promise<TickerData> {
       volume24h: Number(item.volume24h),
     }
   } catch {
+    // Fallback CoinGecko uniquement pour BTC
+    const cgId = symbol.startsWith('ETH') ? 'ethereum' : 'bitcoin'
     const cg = await httpJson<
       Record<string, { usd: number; usd_24h_change: number; usd_24h_vol: number }>
     >(
-      `${COINGECKO_BASE}/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true`
+      `${COINGECKO_BASE}/simple/price?ids=${cgId}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true`
     )
-    const btc = cg.bitcoin
+    const coin = cg[cgId]
     return {
-      price: Number(btc?.usd ?? 0),
-      change24h: Number(btc?.usd_24h_change ?? 0),
-      volume24h: Number(btc?.usd_24h_vol ?? 0),
+      price: Number(coin?.usd ?? 0),
+      change24h: Number(coin?.usd_24h_change ?? 0),
+      volume24h: Number(coin?.usd_24h_vol ?? 0),
     }
   }
 }
 
-export async function fetchFundingRate(): Promise<FundingData> {
+// ─── FUNDING RATE ─────────────────────────────────────────────────────────────
+
+export async function fetchFundingRate(
+  symbol: string = 'BTCUSDT'
+): Promise<FundingData> {
   try {
     const data = await httpJson<{
       retCode: number
@@ -258,7 +252,7 @@ export async function fetchFundingRate(): Promise<FundingData> {
         }[]
       }
     }>(
-      `${BYBIT}/v5/market/funding/history?category=linear&symbol=BTCUSDT&limit=1`
+      `${BYBIT}/v5/market/funding/history?category=linear&symbol=${symbol}&limit=1`
     )
 
     if (data.retCode !== 0 || !data.result?.list?.length) {
@@ -266,10 +260,9 @@ export async function fetchFundingRate(): Promise<FundingData> {
     }
 
     const item = data.result.list[0]
-    const fundingTime = Number(item.fundingRateTimestamp)
     return {
       rate: Number(item.fundingRate),
-      nextFundingTime: fundingTime + 8 * 60 * 60 * 1000,
+      nextFundingTime: Number(item.fundingRateTimestamp) + 8 * 60 * 60 * 1000,
     }
   } catch (err) {
     console.error('[Funding] Bybit failed:', err)
