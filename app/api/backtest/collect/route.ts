@@ -8,8 +8,8 @@ const BYBIT = 'https://api.bybit.com'
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '/data'
 const HISTORY_FILE = path.join(DATA_DIR, 'backtest-history.json')
 
-// 2 ans d'historique 4h = ~4380 bougies
-const TARGET_BARS = 4380
+// 2 ans d'historique 1h = ~17520 bougies
+const TARGET_BARS = 17520
 const BARS_PER_CALL = 200
 
 type RawBar = {
@@ -27,14 +27,14 @@ type KlineRaw = Omit<RawBar, 'oi' | 'fundingRate'>
 
 // ─── KLINES paginées sur 2 ans ────────────────────────────────────────────────
 
-async function fetchKlines4hPaginated(): Promise<KlineRaw[]> {
+async function fetchKlines1hPaginated(): Promise<KlineRaw[]> {
   const allBars: KlineRaw[] = []
   let endTime = Date.now()
   const maxCalls = Math.ceil(TARGET_BARS / BARS_PER_CALL)
   let callCount = 0
 
   while (allBars.length < TARGET_BARS && callCount < maxCalls) {
-    const url = `${BYBIT}/v5/market/kline?category=linear&symbol=BTCUSDT&interval=240&limit=${BARS_PER_CALL}&end=${endTime}`
+    const url = `${BYBIT}/v5/market/kline?category=linear&symbol=BTCUSDT&interval=60&limit=${BARS_PER_CALL}&end=${endTime}`
     const res = await fetch(url, { cache: 'no-store' })
     const data = await res.json()
 
@@ -56,7 +56,7 @@ async function fetchKlines4hPaginated(): Promise<KlineRaw[]> {
     endTime = oldest.time * 1000 - 1
     callCount++
 
-    await new Promise(r => setTimeout(r, 150))
+    await new Promise(r => setTimeout(r, 200))
   }
 
   const seen = new Set<number>()
@@ -68,14 +68,14 @@ async function fetchKlines4hPaginated(): Promise<KlineRaw[]> {
 
 // ─── OI paginé sur 2 ans ──────────────────────────────────────────────────────
 
-async function fetchOI4hPaginated(): Promise<{ time: number; oi: number }[]> {
+async function fetchOI1hPaginated(): Promise<{ time: number; oi: number }[]> {
   const allOI: { time: number; oi: number }[] = []
   let endTime = Date.now()
   const maxCalls = Math.ceil(TARGET_BARS / BARS_PER_CALL)
   let callCount = 0
 
   while (allOI.length < TARGET_BARS && callCount < maxCalls) {
-    const url = `${BYBIT}/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=4h&limit=${BARS_PER_CALL}&endTime=${endTime}`
+    const url = `${BYBIT}/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=1h&limit=${BARS_PER_CALL}&endTime=${endTime}`
     try {
       const res = await fetch(url, { cache: 'no-store' })
       const data = await res.json()
@@ -94,7 +94,7 @@ async function fetchOI4hPaginated(): Promise<{ time: number; oi: number }[]> {
       endTime = oldest.time * 1000 - 1
       callCount++
 
-      await new Promise(r => setTimeout(r, 150))
+      await new Promise(r => setTimeout(r, 200))
     } catch {
       break
     }
@@ -134,7 +134,7 @@ async function fetchFundingPaginated(): Promise<{ time: number; rate: number }[]
       endTime = oldest.time * 1000 - 1
       callCount++
 
-      await new Promise(r => setTimeout(r, 150))
+      await new Promise(r => setTimeout(r, 200))
     } catch {
       break
     }
@@ -177,14 +177,14 @@ export async function GET(req: Request) {
   const force = url.searchParams.get('force') === 'true'
 
   try {
-    // Cache 24h — la collecte 2 ans prend ~30s, inutile de refaire souvent
+    // Cache 21h — la collecte 2 ans prend ~30s, inutile de refaire souvent
     if (!force && fs.existsSync(HISTORY_FILE)) {
       const stat = fs.statSync(HISTORY_FILE)
       const ageHours = (Date.now() - stat.mtimeMs) / 1000 / 3600
       if (ageHours < 24) {
         const existing = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8')) as RawBar[]
         return NextResponse.json({
-          message: 'Données déjà à jour (cache 24h)',
+          message: 'Données déjà à jour (cache 21h)',
           bars: existing.length,
           from: new Date((existing[0]?.time ?? 0) * 1000).toISOString(),
           to: new Date((existing[existing.length - 1]?.time ?? 0) * 1000).toISOString(),
@@ -193,12 +193,12 @@ export async function GET(req: Request) {
       }
     }
 
-    console.log('[BACKTEST] Collecte 2 ans historique 4h...')
+    console.log('[BACKTEST] Collecte 2 ans historique 1h...')
 
-    const klines = await fetchKlines4hPaginated()
+    const klines = await fetchKlines1hPaginated()
     console.log(`[BACKTEST] Klines: ${klines.length}`)
 
-    const oiData = await fetchOI4hPaginated()
+    const oiData = await fetchOI1hPaginated()
     console.log(`[BACKTEST] OI: ${oiData.length}`)
 
     const fundingData = await fetchFundingPaginated()
@@ -210,7 +210,7 @@ export async function GET(req: Request) {
     fs.writeFileSync(HISTORY_FILE, JSON.stringify(merged, null, 2), 'utf-8')
 
     return NextResponse.json({
-      message: `${merged.length} bougies 4h collectées`,
+      message: `${merged.length} bougies 1h collectées`,
       bars: merged.length,
       from: new Date((merged[0]?.time ?? 0) * 1000).toISOString(),
       to: new Date((merged[merged.length - 1]?.time ?? 0) * 1000).toISOString(),
