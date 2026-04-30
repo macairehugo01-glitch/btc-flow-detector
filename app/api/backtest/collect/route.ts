@@ -116,8 +116,8 @@ export async function GET() {
     return NextResponse.json({
       message: 'Données collectées avec succès',
       bars: merged.length,
-      from: new Date(merged[0]?.time * 1000).toISOString(),
-      to: new Date(merged.at(-1)?.time * 1000 ?? 0).toISOString(),
+      from: new Date((merged[0]?.time ?? 0) * 1000).toISOString(),
+      to: new Date((merged[merged.length - 1]?.time ?? 0) * 1000).toISOString(),
       cached: false,
     })
   } catch (error) {
