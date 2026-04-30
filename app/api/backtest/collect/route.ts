@@ -8,8 +8,8 @@ const BYBIT = 'https://api.bybit.com'
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '/data'
 const HISTORY_FILE = path.join(DATA_DIR, 'backtest-history.json')
 
-// 2 ans d'historique 1h = ~35040 bougies
-const TARGET_BARS = 35040
+// 2 ans d'historique 1h = ~17520 bougies
+const TARGET_BARS = 17520
 const BARS_PER_CALL = 200
 
 type RawBar = {
@@ -34,7 +34,7 @@ async function fetchKlines1hPaginated(): Promise<KlineRaw[]> {
   let callCount = 0
 
   while (allBars.length < TARGET_BARS && callCount < maxCalls) {
-    const url = `${BYBIT}/v5/market/kline?category=linear&symbol=BTCUSDT&interval=30&limit=${BARS_PER_CALL}&end=${endTime}`
+    const url = `${BYBIT}/v5/market/kline?category=linear&symbol=BTCUSDT&interval=60&limit=${BARS_PER_CALL}&end=${endTime}`
     const res = await fetch(url, { cache: 'no-store' })
     const data = await res.json()
 
@@ -56,7 +56,7 @@ async function fetchKlines1hPaginated(): Promise<KlineRaw[]> {
     endTime = oldest.time * 1000 - 1
     callCount++
 
-    await new Promise(r => setTimeout(r, 250))
+    await new Promise(r => setTimeout(r, 200))
   }
 
   const seen = new Set<number>()
@@ -75,7 +75,7 @@ async function fetchOI1hPaginated(): Promise<{ time: number; oi: number }[]> {
   let callCount = 0
 
   while (allOI.length < TARGET_BARS && callCount < maxCalls) {
-    const url = `${BYBIT}/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=30min&limit=${BARS_PER_CALL}&endTime=${endTime}`
+    const url = `${BYBIT}/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=1h&limit=${BARS_PER_CALL}&endTime=${endTime}`
     try {
       const res = await fetch(url, { cache: 'no-store' })
       const data = await res.json()
@@ -94,7 +94,7 @@ async function fetchOI1hPaginated(): Promise<{ time: number; oi: number }[]> {
       endTime = oldest.time * 1000 - 1
       callCount++
 
-      await new Promise(r => setTimeout(r, 250))
+      await new Promise(r => setTimeout(r, 200))
     } catch {
       break
     }
@@ -134,7 +134,7 @@ async function fetchFundingPaginated(): Promise<{ time: number; rate: number }[]
       endTime = oldest.time * 1000 - 1
       callCount++
 
-      await new Promise(r => setTimeout(r, 250))
+      await new Promise(r => setTimeout(r, 200))
     } catch {
       break
     }
