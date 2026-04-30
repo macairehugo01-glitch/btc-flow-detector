@@ -12,6 +12,7 @@ type StatBlock = {
 
 type BacktestResults = {
   generatedAt: string
+  symbol: string
   totalBars: number
   totalSweeps: number
   L: StatBlock
@@ -109,14 +110,15 @@ export default function BacktestPage() {
   const [collecting, setCollecting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [collectMsg, setCollectMsg] = useState<string | null>(null)
+  const [symbol, setSymbol] = useState<'BTCUSDT' | 'ETHUSDT'>('BTCUSDT')
 
   async function collect() {
     setCollecting(true); setCollectMsg(null); setError(null)
     try {
-      const res = await fetch('/api/backtest/collect')
+      const res = await fetch(`/api/backtest/collect?symbol=${symbol}`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
-      setCollectMsg(`✓ ${data.bars} bougies collectées${data.cached ? ' (cache)' : ''} — ${new Date(data.from ?? '').toLocaleDateString('fr-FR')} → ${new Date(data.to ?? '').toLocaleDateString('fr-FR')}`)
+      setCollectMsg(`✓ ${data.bars} bougies ${symbol} collectées${data.cached ? ' (cache)' : ''} — ${new Date(data.from ?? '').toLocaleDateString('fr-FR')} → ${new Date(data.to ?? '').toLocaleDateString('fr-FR')}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Erreur collecte')
     } finally {
@@ -127,7 +129,7 @@ export default function BacktestPage() {
   async function runBacktest() {
     setLoading(true); setError(null)
     try {
-      const res = await fetch('/api/backtest/run')
+      const res = await fetch(`/api/backtest/run?symbol=${symbol}`)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
       setResults(data)
@@ -161,6 +163,18 @@ export default function BacktestPage() {
             <div style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 4 }}>
               Validation empirique — Sessions · Funding directionnel · HTF Context · Age du sweep
             </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {(['BTCUSDT', 'ETHUSDT'] as const).map(s => (
+              <button key={s} onClick={() => { setSymbol(s); setResults(null) }} style={{
+                padding: '8px 16px', borderRadius: 8, border: '1px solid var(--bg-border)',
+                background: symbol === s ? 'var(--accent-yellow)' : 'var(--bg-card)',
+                color: symbol === s ? '#000' : 'var(--text-primary)',
+                fontFamily: 'monospace', fontSize: 13, fontWeight: symbol === s ? 700 : 400, cursor: 'pointer',
+              }}>
+                {s.replace('USDT', '')}
+              </button>
+            ))}
           </div>
           <div style={{ display: 'flex', gap: 12 }}>
             <button onClick={collect} disabled={collecting} style={{ padding: '10px 20px', borderRadius: 8, border: '1px solid var(--bg-border)', background: 'var(--bg-card)', color: 'var(--text-primary)', fontFamily: 'monospace', fontSize: 13, cursor: 'pointer' }}>
