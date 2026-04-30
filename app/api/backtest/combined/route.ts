@@ -204,15 +204,16 @@ export async function GET() {
   try {
     // Charger les 4 fichiers historiques
     const slotFiles: Record<SlotKey, string> = {
-      'BTC-1h': path.join(DATA_DIR, 'backtest-history-btcusdt.json'),
+      'BTC-1h':  path.join(DATA_DIR, 'backtest-history-btcusdt-1h.json'),
       'BTC-15m': path.join(DATA_DIR, 'backtest-history-btcusdt-15m.json'),
-      'ETH-1h': path.join(DATA_DIR, 'backtest-history-ethusdt.json'),
+      'ETH-1h':  path.join(DATA_DIR, 'backtest-history-ethusdt-1h.json'),
       'ETH-15m': path.join(DATA_DIR, 'backtest-history-ethusdt-15m.json'),
     }
 
-    // Fallbacks sur les fichiers existants
+    // Fallbacks sur les anciens fichiers collectés avant la mise à jour
     const fallbacks: Partial<Record<SlotKey, string>> = {
-      'BTC-1h': path.join(DATA_DIR, 'backtest-history.json'),
+      'BTC-1h': path.join(DATA_DIR, 'backtest-history-btcusdt.json'),
+      'ETH-1h': path.join(DATA_DIR, 'backtest-history-ethusdt.json'),
     }
 
     const allTrades: TradeResult[] = []
