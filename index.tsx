@@ -111,4 +111,3 @@ export function Header({ onRefresh }: { onRefresh: () => void }) {
     </header>
   )
 }
-}
