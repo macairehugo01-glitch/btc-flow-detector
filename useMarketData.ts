@@ -1,4 +1,5 @@
 'use client'
+
 import { useCallback, useEffect } from 'react'
 import { useMarketStore } from './useMarketStore'
 
@@ -20,8 +21,7 @@ export function useMarketData() {
       if (!res.ok) {
         throw new Error(data?.error || 'Failed to fetch market data')
       }
-      // setMarketData AVANT setLoading(false) pour que isReady
-      // ne devienne true qu'une fois les données réellement présentes
+
       setMarketData({
         klines: data.klines ?? [],
         vwap: data.vwap ?? [],
@@ -31,24 +31,23 @@ export function useMarketData() {
         funding: data.funding ?? null,
         signal: data.signal ?? null,
         setupHistory: data.setupHistory ?? [],
-        setupStats: data.setupStats ?? {
-          total: 0,
-          wins: 0,
-          losses: 0,
-          open: 0,
-          winrate: 0,
-        },
+        setupStats: data.setupStats ?? { total: 0, wins: 0, losses: 0, open: 0, winrate: 0 },
         sessionStats: data.sessionStats ?? [],
         lastUpdate: data.lastUpdate ?? Date.now(),
+        // ─── 4 slots ─────────────────────────────────────────────────────────
+        slotSignals: data.slotSignals ?? null,
+        allPositions: data.allPositions ?? null,
+        slotStats: data.slotStats ?? null,
+        activeSweeps: data.activeSweeps ?? null,
       })
+
       setConnected(true)
-      setLoading(false) // ← après setMarketData, pas dans finally
+      setLoading(false)
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Unknown data loading error'
+      const message = error instanceof Error ? error.message : 'Unknown data loading error'
       setError(message)
       setConnected(false)
-      setLoading(false) // ← aussi en cas d'erreur pour débloquer l'UI
+      setLoading(false)
     }
   }, [timeframe, setConnected, setError, setLoading, setMarketData])
 
