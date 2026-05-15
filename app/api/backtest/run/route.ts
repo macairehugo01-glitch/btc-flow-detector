@@ -195,12 +195,31 @@ function buildSweepEvent(
 
   const fundingAligned = isFundingAligned(fundingAtSweep, direction)
 
-  // Trouver les bougies de confirmation (jusqu'à 6 bougies après le sweep)
-  const confirmBars = bars.slice(i + 1, i + 7)
-  const entryBarIndex = confirmBars.findIndex(b =>
-    direction === 'high' ? b.close < vwapAtEntry : b.close > vwapAtEntry
-  )
-  const sweepAge = getSweepAge(entryBarIndex >= 0 ? entryBarIndex + 1 : 6)
+  // ─── AJUSTEMENTS v2 ───────────────────────────────────────────────────────
+  // TTL sweep élargi : 4 bougies au lieu de 2 (fresh) et 8 au lieu de 6 (recent)
+  const confirmBars = bars.slice(i + 1, i + 9) // fenêtre élargie à 8 bougies
+  
+  // R-VWAP sur prix intra-bougie (low/high) pas seulement le close
+  // Un rejet violent peut fermer loin de la VWAP mais avoir touché la VWAP intrabar
+  const entryBarIndex = confirmBars.findIndex(b => {
+    if (direction === 'high') {
+      // Prix a touché ou passé sous la VWAP (low de la bougie ou close)
+      return b.low < vwapAtEntry || b.close < vwapAtEntry
+    } else {
+      // Prix a touché ou passé au-dessus de la VWAP
+      return b.high > vwapAtEntry || b.close > vwapAtEntry
+    }
+  })
+  const sweepAge = getSweepAge(entryBarIndex >= 0 ? entryBarIndex + 1 : 8)
+
+  // Distance VWAP assouplie : on utilise le low/high de la bougie d'entrée
+  // pas uniquement le close — si le prix approche la VWAP intrabar c'est suffisant
+  const entryBar = entryBarIndex >= 0 ? confirmBars[entryBarIndex] : null
+  const entryPrice = entryBar
+    ? direction === 'high'
+      ? Math.max(entryBar.close, vwapAtEntry * 0.998) // entrée proche VWAP côté vendeur
+      : Math.min(entryBar.close, vwapAtEntry * 1.002) // entrée proche VWAP côté acheteur
+    : candle.close
 
   // Scoring
   let scoreL = 0, scoreF = 0, scoreR = 0
@@ -214,10 +233,12 @@ function buildSweepEvent(
   if (direction === 'high' && cvdDirection === 'bearish') scoreF += 1
   if (direction === 'low' && cvdDirection === 'bullish') scoreF += 1
 
-  // R VWAP (2pts)
-  const checkBars = bars.slice(i + 1, i + 4)
+  // R VWAP (2pts) — sur low/high intrabar dans la fenêtre de 8 bougies
+  const checkBars = bars.slice(i + 1, i + 9)
   const vwapReaction = checkBars.some(b =>
-    direction === 'high' ? b.close < vwapAtEntry : b.close > vwapAtEntry
+    direction === 'high'
+      ? b.low < vwapAtEntry || b.close < vwapAtEntry   // touche la VWAP par le bas
+      : b.high > vwapAtEntry || b.close > vwapAtEntry  // touche la VWAP par le haut
   )
   if (vwapReaction) scoreR += 2
 
@@ -231,22 +252,24 @@ function buildSweepEvent(
 
   const score = scoreL + scoreF + scoreR
 
-  // Trade — TP 3R
+  // Trade — TP 3R — entrée au prix VWAP si touché intrabar
   const slPct = 0.002
-  const entryPrice = candle.close
+  const finalEntryPrice = entryPrice
   const slPrice = direction === 'high'
     ? structureLevel * (1 + slPct)
     : structureLevel * (1 - slPct)
-  const risk = Math.abs(entryPrice - slPrice)
+  const risk = Math.abs(finalEntryPrice - slPrice)
   const tpPrice = direction === 'high'
-    ? entryPrice - risk * 3
-    : entryPrice + risk * 3
+    ? finalEntryPrice - risk * 3
+    : finalEntryPrice + risk * 3
 
   let outcome: 'win' | 'loss' | 'breakeven' = 'breakeven'
   let rMultiple = 0
   let barsToClose = 0
 
-  for (let j = i + 1; j < Math.min(i + 16, bars.length); j++) {
+  const startBar = entryBarIndex >= 0 ? i + entryBarIndex + 1 : i + 1
+
+  for (let j = startBar; j < Math.min(startBar + 16, bars.length); j++) {
     const b = bars[j]
     barsToClose = j - i
     if (direction === 'high') {
@@ -278,7 +301,7 @@ function buildSweepEvent(
     scoreR,
     outcome,
     rMultiple,
-    entryPrice,
+    entryPrice: finalEntryPrice,
     slPrice,
     tpPrice,
     barsToClose,
