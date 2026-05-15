@@ -153,9 +153,14 @@ export default function AnalyticsPanel() {
         <a href="/backtest/combined" style={{ flex: 1, textAlign: 'center', padding: '10px', borderRadius: 8, border: '1px solid var(--bg-border)', background: 'var(--bg-primary)', color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: 12, textDecoration: 'none' }}>
           📊 Backtest combiné
         </a>
+        <a href="/api/analytics/export" style={{ flex: 1, textAlign: 'center', padding: '10px', borderRadius: 8, border: '1px solid var(--bg-border)', background: 'var(--bg-primary)', color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: 12, textDecoration: 'none' }}>
+          📥 Export CSV trades
+        </a>
+        <a href="/api/signal/log" style={{ flex: 1, textAlign: 'center', padding: '10px', borderRadius: 8, border: '1px solid rgba(0,212,168,0.3)', background: 'rgba(0,212,168,0.06)', color: 'var(--accent-green)', fontFamily: 'monospace', fontSize: 12, textDecoration: 'none' }}>
+          📋 Export log signaux
+        </a>
       </div>
 
     </div>
   )
 }
-
