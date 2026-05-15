@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
+import fs from 'fs'
+import path from 'path'
 import {
   fetchKlines,
   fetchCurrentOI,
@@ -408,6 +410,47 @@ function computeSignal(
 
 // ─── HANDLER PRINCIPAL ────────────────────────────────────────────────────────
 
+const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '/data'
+const SIGNAL_LOG = path.join(DATA_DIR, 'signal-log.csv')
+
+function logSignalCSV(row: {
+  time: string
+  slot: string
+  score: number
+  action: string
+  sweep_active: boolean
+  sweep_age_min: number
+  sweep_direction: string
+  vwap_distance_pct: number
+  vwap_distance_ok: boolean
+  cooldown: boolean
+  funding_blocked: boolean
+  has_position: boolean
+  weekend: boolean
+  trade_taken: boolean
+  reason_no_trade: string
+  price: number
+  vwap: number
+  funding_rate: number
+  cvd_delta: number
+}) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
+    const headers = Object.keys(row).join(',')
+    const values = Object.values(row).map(v => {
+      const str = String(v)
+      return str.includes(',') ? `"${str}"` : str
+    }).join(',')
+
+    if (!fs.existsSync(SIGNAL_LOG)) {
+      fs.writeFileSync(SIGNAL_LOG, headers + '\n', 'utf-8')
+    }
+    fs.appendFileSync(SIGNAL_LOG, values + '\n', 'utf-8')
+  } catch (err) {
+    console.error('[LOG] CSV write error:', err)
+  }
+}
+
 export async function GET(req: NextRequest) {
   const weekend = isWeekend()
 
@@ -491,8 +534,43 @@ export async function GET(req: NextRequest) {
         const referenceBarKey = `${slot}-${lastK?.time ?? 0}`
 
         const canTrade = !cooldown && distanceOk && !fundingBlocked && !currentPos && !!data.ticker
+        const tradeTaken = canTrade && !hasRecentDuplicate(slot, signal.action as 'BUY' | 'SELL', Date.now())
 
-        if (canTrade && !hasRecentDuplicate(slot, signal.action as 'BUY' | 'SELL', Date.now())) {
+        // Déterminer la raison du non-trade
+        let reasonNoTrade = ''
+        if (!tradeTaken) {
+          if (cooldown) reasonNoTrade = 'cooldown'
+          else if (!distanceOk) reasonNoTrade = `vwap_trop_loin_${signal.metrics.distanceFromVwapPct.toFixed(3)}pct`
+          else if (fundingBlocked) reasonNoTrade = `funding_bloque_${fundingRate.toFixed(5)}`
+          else if (currentPos) reasonNoTrade = 'position_deja_ouverte'
+          else if (!data.ticker) reasonNoTrade = 'ticker_manquant'
+          else reasonNoTrade = 'duplicate_recent'
+        }
+
+        // Log CSV
+        logSignalCSV({
+          time: new Date().toISOString(),
+          slot,
+          score: signal.score,
+          action: signal.action,
+          sweep_active: !!sweepStates[slot],
+          sweep_age_min: Math.round(signal.sweepAge ?? 0),
+          sweep_direction: sweepStates[slot]?.direction ?? '',
+          vwap_distance_pct: Math.round(signal.metrics.distanceFromVwapPct * 10000) / 10000,
+          vwap_distance_ok: distanceOk,
+          cooldown,
+          funding_blocked: fundingBlocked,
+          has_position: !!currentPos,
+          weekend,
+          trade_taken: tradeTaken,
+          reason_no_trade: tradeTaken ? 'trade_pris' : reasonNoTrade,
+          price: data.ticker?.price ?? 0,
+          vwap: Math.round(signal.vwap * 100) / 100,
+          funding_rate: fundingRate,
+          cvd_delta: Math.round(signal.metrics.cvdDelta * 100) / 100,
+        })
+
+        if (tradeTaken) {
           console.log(`[TRADE] ${slot} openPosition: ${signal.action} @ ${data.ticker!.price}`)
           await openPosition({
             slot,
@@ -512,6 +590,30 @@ export async function GET(req: NextRequest) {
           sweepStates[slot] = null
           saveSweepState(null, slot)
         }
+      } else {
+        // Log aussi les signaux non-4/5 pour comprendre pourquoi rien ne se passe
+        const sweep = sweepStates[slot]
+        logSignalCSV({
+          time: new Date().toISOString(),
+          slot,
+          score: signal.score,
+          action: signal.action,
+          sweep_active: !!sweep,
+          sweep_age_min: Math.round(signal.sweepAge ?? 0),
+          sweep_direction: sweep?.direction ?? '',
+          vwap_distance_pct: Math.round(signal.metrics.distanceFromVwapPct * 10000) / 10000,
+          vwap_distance_ok: signal.metrics.distanceFromVwapPct <= config.vwapDistanceMax,
+          cooldown: isInCooldown(slot),
+          funding_blocked: false,
+          has_position: !!getCurrentPosition(slot),
+          weekend,
+          trade_taken: false,
+          reason_no_trade: weekend ? 'weekend' : signal.score < 4 ? `score_${signal.score}_sur_5` : 'stable_pas_de_sweep',
+          price: data.ticker?.price ?? 0,
+          vwap: Math.round(signal.vwap * 100) / 100,
+          funding_rate: signal.metrics.fundingRate,
+          cvd_delta: Math.round(signal.metrics.cvdDelta * 100) / 100,
+        })
       }
     }
 
