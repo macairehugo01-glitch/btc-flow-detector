@@ -201,25 +201,13 @@ function buildSweepEvent(
   
   // R-VWAP sur prix intra-bougie (low/high) pas seulement le close
   // Un rejet violent peut fermer loin de la VWAP mais avoir touché la VWAP intrabar
-  const entryBarIndex = confirmBars.findIndex(b => {
-    if (direction === 'high') {
-      // Mèche basse touche la VWAP ET close sous la VWAP
-      return b.low <= vwapAtEntry && b.close < vwapAtEntry
-    } else {
-      // Mèche haute touche la VWAP ET close au-dessus de la VWAP
-      return b.high >= vwapAtEntry && b.close > vwapAtEntry
-    }
-  })
+  const entryBarIndex = confirmBars.findIndex(b =>
+    direction === 'high' ? b.close < vwapAtEntry : b.close > vwapAtEntry
+  )
   const sweepAge = getSweepAge(entryBarIndex >= 0 ? entryBarIndex + 1 : 8)
 
-  // Distance VWAP assouplie : on utilise le low/high de la bougie d'entrée
-  // pas uniquement le close — si le prix approche la VWAP intrabar c'est suffisant
   const entryBar = entryBarIndex >= 0 ? confirmBars[entryBarIndex] : null
-  const entryPrice = entryBar
-    ? direction === 'high'
-      ? Math.max(entryBar.close, vwapAtEntry * 0.998) // entrée proche VWAP côté vendeur
-      : Math.min(entryBar.close, vwapAtEntry * 1.002) // entrée proche VWAP côté acheteur
-    : candle.close
+  const entryPrice = entryBar ? entryBar.close : candle.close
 
   // Scoring
   let scoreL = 0, scoreF = 0, scoreR = 0
@@ -233,17 +221,11 @@ function buildSweepEvent(
   if (direction === 'high' && cvdDirection === 'bearish') scoreF += 1
   if (direction === 'low' && cvdDirection === 'bullish') scoreF += 1
 
-  // R VWAP (2pts) — mèche touche VWAP ET close du bon côté
-  const checkBars = bars.slice(i + 1, i + 9)
-  const vwapReaction = checkBars.some(b => {
-    if (direction === 'high') {
-      // Mèche basse touche la VWAP ET close sous la VWAP
-      return b.low <= vwapAtEntry && b.close < vwapAtEntry
-    } else {
-      // Mèche haute touche la VWAP ET close au-dessus de la VWAP
-      return b.high >= vwapAtEntry && b.close > vwapAtEntry
-    }
-  })
+  // R VWAP (2pts) — close de la bougie sous/sur la VWAP
+  const checkBars = bars.slice(i + 1, i + 4)
+  const vwapReaction = checkBars.some(b =>
+    direction === 'high' ? b.close < vwapAtEntry : b.close > vwapAtEntry
+  )
   if (vwapReaction) scoreR += 2
 
   // R Structure (1pt)
