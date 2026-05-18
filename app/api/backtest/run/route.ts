@@ -357,9 +357,12 @@ export async function GET(req: Request) {
   }
 
   const HISTORY_FILE = path.join(DATA_DIR, `backtest-history-${symbol.toLowerCase()}.json`)
-  // Fallback sur l'ancien fichier BTC si le nouveau n'existe pas encore
+  const HISTORY_FILE_1H = path.join(DATA_DIR, `backtest-history-${symbol.toLowerCase()}-1h.json`)
   const FALLBACK_FILE = path.join(DATA_DIR, 'backtest-history.json')
+
+  // Chercher dans l'ordre : ancien format → nouveau format 1h → fallback BTC
   const fileToUse = fs.existsSync(HISTORY_FILE) ? HISTORY_FILE
+    : fs.existsSync(HISTORY_FILE_1H) ? HISTORY_FILE_1H
     : (symbol === 'BTCUSDT' && fs.existsSync(FALLBACK_FILE)) ? FALLBACK_FILE
     : null
 
