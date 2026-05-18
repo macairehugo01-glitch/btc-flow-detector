@@ -145,8 +145,8 @@ function detectSweep(bars: RawBar[], i: number): SweepEvent | null {
     .reduce((s, k) => s + k.volume, 0) / Math.min(20, i)
 
   const volMult = avgVol > 0 ? candle.volume / avgVol : 1
-  const hasVolume = volMult > 1.2  // assoupli de 1.5 à 1.2
-  const wickThreshold = volMult >= 3 ? 0.2 : 0.4  // assoupli de 0.3/0.6 à 0.2/0.4
+  const hasVolume = volMult > 1.5
+  const wickThreshold = volMult >= 3 ? 0.3 : 0.6
   const totalSize = candle.high - candle.low
   if (totalSize === 0 || !hasVolume) return null
 
