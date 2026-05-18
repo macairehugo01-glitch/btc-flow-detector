@@ -203,11 +203,11 @@ function buildSweepEvent(
   // Un rejet violent peut fermer loin de la VWAP mais avoir touché la VWAP intrabar
   const entryBarIndex = confirmBars.findIndex(b => {
     if (direction === 'high') {
-      // Prix a touché ou passé sous la VWAP (low de la bougie ou close)
-      return b.low < vwapAtEntry || b.close < vwapAtEntry
+      // Mèche basse touche la VWAP ET close sous la VWAP
+      return b.low <= vwapAtEntry && b.close < vwapAtEntry
     } else {
-      // Prix a touché ou passé au-dessus de la VWAP
-      return b.high > vwapAtEntry || b.close > vwapAtEntry
+      // Mèche haute touche la VWAP ET close au-dessus de la VWAP
+      return b.high >= vwapAtEntry && b.close > vwapAtEntry
     }
   })
   const sweepAge = getSweepAge(entryBarIndex >= 0 ? entryBarIndex + 1 : 8)
@@ -233,13 +233,17 @@ function buildSweepEvent(
   if (direction === 'high' && cvdDirection === 'bearish') scoreF += 1
   if (direction === 'low' && cvdDirection === 'bullish') scoreF += 1
 
-  // R VWAP (2pts) — sur low/high intrabar dans la fenêtre de 8 bougies
+  // R VWAP (2pts) — mèche touche VWAP ET close du bon côté
   const checkBars = bars.slice(i + 1, i + 9)
-  const vwapReaction = checkBars.some(b =>
-    direction === 'high'
-      ? b.low < vwapAtEntry || b.close < vwapAtEntry   // touche la VWAP par le bas
-      : b.high > vwapAtEntry || b.close > vwapAtEntry  // touche la VWAP par le haut
-  )
+  const vwapReaction = checkBars.some(b => {
+    if (direction === 'high') {
+      // Mèche basse touche la VWAP ET close sous la VWAP
+      return b.low <= vwapAtEntry && b.close < vwapAtEntry
+    } else {
+      // Mèche haute touche la VWAP ET close au-dessus de la VWAP
+      return b.high >= vwapAtEntry && b.close > vwapAtEntry
+    }
+  })
   if (vwapReaction) scoreR += 2
 
   // R Structure (1pt)
