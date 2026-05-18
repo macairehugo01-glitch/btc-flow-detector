@@ -253,6 +253,7 @@ type SignalResult = {
     priceVsVwapPct: number
     cvdDelta: number
     distanceFromVwapPct: number
+    wickDistancePct: number  // distance mèche → VWAP
     fundingRate: number
   }
   marketRegime: string
@@ -278,7 +279,7 @@ function computeSignal(
 
   const stable: SignalResult = {
     action: 'STABLE', score: 0, reasons: ['Données insuffisantes.'],
-    vwap: currentVwap, metrics: { priceVsVwapPct: 0, cvdDelta: 0, distanceFromVwapPct: 0, fundingRate },
+    vwap: currentVwap, metrics: { priceVsVwapPct: 0, cvdDelta: 0, distanceFromVwapPct: 0, wickDistancePct: 0, fundingRate },
     marketRegime, volatilityBucket,
   }
 
@@ -293,18 +294,40 @@ function computeSignal(
   }
 
   const priceVsVwapPct = ((lastK.close - lastV.vwap) / lastV.vwap) * 100
+
+  // Distance VWAP sur le point de contact intrabar (mèche) pas seulement le close
+  // Si la mèche touche la VWAP, la distance est nulle même si le close est plus loin
+  const contactPriceSell = lastK.low   // pour SELL : le low s'approche de la VWAP
+  const contactPriceBuy  = lastK.high  // pour BUY : le high s'approche de la VWAP
   const distanceFromVwapPct = Math.abs(priceVsVwapPct)
+
   const cvdDelta = lastCvd.cvd - prevCvd.cvd
   const sweepAgeMin = (Date.now() - sweep.detectedAt) / 1000 / 60
 
   const aboveVwap = lastK.close > lastV.vwap
   const belowVwap = lastK.close < lastV.vwap
 
-  // Détection rejet/reclaim VWAP
+  // Détection rejet/reclaim VWAP — mèche touche + close du bon côté
   const prevK = klines.at(-2)
   const prevV = vwap.at(-2)
-  const vwapReject = !!prevK && !!prevV && prevK.close > prevV.vwap && lastK.close < lastV.vwap
-  const vwapReclaim = !!prevK && !!prevV && prevK.close < prevV.vwap && lastK.close > lastV.vwap
+
+  // SELL : mèche basse touche ou passe sous la VWAP ET close reste sous la VWAP
+  const vwapReject = (
+    contactPriceSell <= lastV.vwap && belowVwap
+  ) || (
+    !!prevK && !!prevV && prevK.close > prevV.vwap && lastK.close < lastV.vwap
+  )
+
+  // BUY : mèche haute touche ou passe au-dessus de la VWAP ET close reste au-dessus
+  const vwapReclaim = (
+    contactPriceBuy >= lastV.vwap && aboveVwap
+  ) || (
+    !!prevK && !!prevV && prevK.close < prevV.vwap && lastK.close > lastV.vwap
+  )
+
+  // Distance sur la mèche pour le filtre d'entrée
+  const distanceSell = Math.abs((contactPriceSell - lastV.vwap) / lastV.vwap) * 100
+  const distanceBuy  = Math.abs((contactPriceBuy  - lastV.vwap) / lastV.vwap) * 100
 
   // Structure LH/HL
   const prev3K = klines.at(-4)
@@ -313,7 +336,13 @@ function computeSignal(
 
   const cvdNonStable = Math.abs(cvdDelta) > 0
 
-  const metrics = { priceVsVwapPct, cvdDelta, distanceFromVwapPct, fundingRate }
+  const metrics = {
+    priceVsVwapPct,
+    cvdDelta,
+    distanceFromVwapPct,
+    wickDistancePct: sweep.direction === 'high' ? distanceSell : distanceBuy,
+    fundingRate,
+  }
 
   // ── SETUP SELL (sweep HIGH) ──
   if (sweep.direction === 'high') {
@@ -524,7 +553,9 @@ export async function GET(req: NextRequest) {
       // Trading si conditions réunies
       if (!weekend && signal.action !== 'STABLE' && signal.score === 4) {
         const cooldown = isInCooldown(slot)
-        const distanceOk = signal.metrics.distanceFromVwapPct <= config.vwapDistanceMax
+        // Distance sur la mèche (contact intrabar) plutôt que sur le close
+        const wickDistance = signal.metrics.wickDistancePct ?? signal.metrics.distanceFromVwapPct
+        const distanceOk = wickDistance <= config.vwapDistanceMax
         const fundingRate = signal.metrics.fundingRate
         const fundingBlocked = signal.action === 'BUY' && fundingRate > 0.0005
           || signal.action === 'SELL' && fundingRate < -0.0005
