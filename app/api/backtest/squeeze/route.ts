@@ -22,7 +22,7 @@ const LOOKBACK_BARS = 5
 const IMPULSE_ATR_MULT = 1.3
 const ATR_PERIOD = 14
 const OI_DROP_PCT = 1.5          // OI doit baisser d'au moins 1.5% sur la fenêtre
-const DELTA_DOMINANCE_MIN = 0.55 // proxy : volume net directionnel / volume brut
+let DELTA_DOMINANCE_MIN = 0.55   // proxy : volume net directionnel / volume brut — ajustable via ?dom=
 const CONFIRM_BARS = 2           // clôtures consécutives de l'autre côté de la VWAP
 let SQUEEZE_TTL_BARS = 8         // fenêtre pour que la confirmation arrive — ajustable via ?ttl=
 const VWAP_WINDOW = 50
@@ -278,6 +278,9 @@ export async function GET(req: Request) {
 
   const ttlParam = Number(url.searchParams.get('ttl'))
   if (ttlParam > 0) SQUEEZE_TTL_BARS = ttlParam
+
+  const domParam = Number(url.searchParams.get('dom'))
+  if (domParam > 0 && domParam < 1) DELTA_DOMINANCE_MIN = domParam
 
   const allowed = ['BTCUSDT', 'ETHUSDT']
   if (!allowed.includes(symbol)) {
