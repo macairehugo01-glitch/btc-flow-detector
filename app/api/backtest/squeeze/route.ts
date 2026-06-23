@@ -27,7 +27,7 @@ const CONFIRM_BARS = 2           // clôtures consécutives de l'autre côté de
 const SQUEEZE_TTL_BARS = 8       // fenêtre pour que la confirmation arrive
 const VWAP_WINDOW = 50
 const COOLDOWN_BARS_AFTER_TRIGGER = 12 // anti-doublon sur triggers qui se chevauchent
-const RR = 3                     // même RR que le système LFR pour comparer équitablement
+let RR = 3                       // ajustable via ?rr= dans l'URL pour tester
 const SL_BUFFER_PCT = 0.002
 const MAX_BARS_TO_RESOLVE = 16
 
@@ -270,6 +270,9 @@ export async function GET(req: Request) {
   const symbol = (url.searchParams.get('symbol') ?? 'BTCUSDT').toUpperCase()
   const tf = url.searchParams.get('tf') ?? '1h'
 
+  const rrParam = Number(url.searchParams.get('rr'))
+  if (rrParam > 0) RR = rrParam
+
   const allowed = ['BTCUSDT', 'ETHUSDT']
   if (!allowed.includes(symbol)) {
     return NextResponse.json({ error: `Symbole non supporté: ${symbol}` }, { status: 400 })
@@ -322,7 +325,7 @@ export async function GET(req: Request) {
         up_to_sell: calcStats(events.filter(e => e.direction === 'up')),
         down_to_buy: calcStats(events.filter(e => e.direction === 'down')),
       },
-      events,
+      events: events.slice(-300),
     }
 
     const RESULTS_FILE = path.join(DATA_DIR, `squeeze-backtest-results-${symbol.toLowerCase()}-${tf}.json`)
