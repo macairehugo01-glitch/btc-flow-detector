@@ -26,7 +26,7 @@ const DELTA_DOMINANCE_MIN = 0.55 // proxy : volume net directionnel / volume bru
 const CONFIRM_BARS = 2           // clôtures consécutives de l'autre côté de la VWAP
 const SQUEEZE_TTL_BARS = 8       // fenêtre pour que la confirmation arrive
 const VWAP_WINDOW = 50
-const COOLDOWN_BARS_AFTER_TRIGGER = 12 // anti-doublon sur triggers qui se chevauchent
+let COOLDOWN_BARS_AFTER_TRIGGER = 12 // anti-doublon — ajustable via ?cooldown= dans l'URL pour tester
 let RR = 3                       // ajustable via ?rr= dans l'URL pour tester
 const SL_BUFFER_PCT = 0.002
 const MAX_BARS_TO_RESOLVE = 16
@@ -272,6 +272,9 @@ export async function GET(req: Request) {
 
   const rrParam = Number(url.searchParams.get('rr'))
   if (rrParam > 0) RR = rrParam
+
+  const cooldownParam = url.searchParams.get('cooldown')
+  if (cooldownParam !== null && Number(cooldownParam) >= 0) COOLDOWN_BARS_AFTER_TRIGGER = Number(cooldownParam)
 
   const allowed = ['BTCUSDT', 'ETHUSDT']
   if (!allowed.includes(symbol)) {
