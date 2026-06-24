@@ -23,10 +23,10 @@ const DEFAULT_COOLDOWN_BARS = 12
 const DEFAULT_TTL_BARS = 8
 const DEFAULT_DOMINANCE_MIN = 0.5
 const DEFAULT_IMPULSE_ATR_MULT = 1.3
+const DEFAULT_OI_DROP_PCT = 1.5
 
 const LOOKBACK_BARS = 5
 const ATR_PERIOD = 14
-const OI_DROP_PCT = 1.5
 const CONFIRM_BARS = 2
 const VWAP_WINDOW = 50
 const SL_BUFFER_PCT = 0.002
@@ -61,7 +61,17 @@ type SqueezeBacktestResults = {
   generatedAt: string
   symbol: string
   timeframe: string
-  paramsUsed: { rr: number; cooldown: number; ttl: number; dom: number; atrMult: number }
+  paramsUsed: {
+    cooldown: number
+    ttl: number
+    rrUp: number
+    rrDown: number
+    domUp: number
+    domDown: number
+    atrMultUp: number
+    atrMultDown: number
+    oiDrop: number
+  }
   totalBars: number
   totalTriggers: number
   totalConfirmed: number
@@ -137,8 +147,11 @@ function detectSqueezeAt(
   bars: RawBar[],
   atr: number[],
   i: number,
-  deltaDominanceMin: number,
-  impulseAtrMult: number
+  domMinUp: number,
+  domMinDown: number,
+  atrMultUp: number,
+  atrMultDown: number,
+  oiDropPct: number
 ): Trigger | null {
   const startIdx = i - LOOKBACK_BARS + 1
   if (startIdx < ATR_PERIOD) return null
@@ -147,6 +160,8 @@ function detectSqueezeAt(
   const endBar = bars[i]
 
   const priceMove = endBar.close - startBar.close
+  const direction: SqueezeDirection = priceMove > 0 ? 'up' : 'down'
+  const impulseAtrMult = direction === 'up' ? atrMultUp : atrMultDown
   const impulseOk = Math.abs(priceMove) > impulseAtrMult * atr[i]
   if (!impulseOk) return null
 
@@ -154,11 +169,11 @@ function detectSqueezeAt(
   const oiEnd = endBar.oi
   if (!oiStart || oiStart <= 0) return null
   const oiChangePct = ((oiEnd - oiStart) / oiStart) * 100
-  const oiDropOk = oiChangePct <= -OI_DROP_PCT
+  const oiDropOk = oiChangePct <= -oiDropPct
   if (!oiDropOk) return null
 
   const dominance = deltaDominanceOverWindow(bars, startIdx, i)
-  const direction: SqueezeDirection = priceMove > 0 ? 'up' : 'down'
+  const deltaDominanceMin = direction === 'up' ? domMinUp : domMinDown
 
   if (direction === 'up' && dominance < deltaDominanceMin) return null
   if (direction === 'down' && dominance > -deltaDominanceMin) return null
@@ -179,8 +194,10 @@ function resolveSqueezeTrade(
   bars: RawBar[],
   trigger: Trigger,
   ttlBars: number,
-  rr: number
+  rrUp: number,
+  rrDown: number
 ): SqueezeEvent {
+  const rr = trigger.direction === 'up' ? rrUp : rrDown
   const i = trigger.triggerIdx
   const windowStart = i - LOOKBACK_BARS + 1
   const windowBars = bars.slice(windowStart, i + 1)
@@ -259,18 +276,17 @@ function resolveSqueezeTrade(
   }
 }
 
-function calcStats(events: SqueezeEvent[], rr: number): StatBlock {
+function calcStats(events: SqueezeEvent[]): StatBlock {
   const closed = events.filter(e => e.outcome === 'win' || e.outcome === 'loss')
   const wins = closed.filter(e => e.outcome === 'win')
   const winRate = closed.length > 0 ? wins.length / closed.length : 0
   const avgR = closed.length > 0 ? closed.reduce((s, e) => s + e.rMultiple, 0) / closed.length : 0
-  const expectancy = winRate * rr - (1 - winRate) * 1
   return {
     trades: closed.length,
     wins: wins.length,
     winRate: Math.round(winRate * 1000) / 10,
     avgR: Math.round(avgR * 1000) / 1000,
-    expectancy: Math.round(expectancy * 1000) / 1000,
+    expectancy: Math.round(avgR * 1000) / 1000,
   }
 }
 
@@ -283,8 +299,8 @@ export async function GET(req: Request) {
 
   // Tous les paramètres sont résolus en variables LOCALES à cette requête —
   // aucune mutation d'état partagé entre requêtes (fix du bug dom=0).
-  const rrRaw = url.searchParams.get('rr')
-  const RR = (rrRaw !== null && Number(rrRaw) > 0) ? Number(rrRaw) : DEFAULT_RR
+  // RR, dom et atrMult sont désormais séparés par direction (UP/SELL vs DOWN/BUY).
+  // cooldown, ttl et oiDrop restent globaux (rien n'indique qu'ils doivent diverger).
 
   const cooldownRaw = url.searchParams.get('cooldown')
   const COOLDOWN_BARS_AFTER_TRIGGER = (cooldownRaw !== null && Number(cooldownRaw) >= 0)
@@ -294,15 +310,34 @@ export async function GET(req: Request) {
   const ttlRaw = url.searchParams.get('ttl')
   const SQUEEZE_TTL_BARS = (ttlRaw !== null && Number(ttlRaw) > 0) ? Number(ttlRaw) : DEFAULT_TTL_BARS
 
-  const domRaw = url.searchParams.get('dom')
-  const DELTA_DOMINANCE_MIN = (domRaw !== null && Number(domRaw) >= 0 && Number(domRaw) < 1)
-    ? Number(domRaw)
+  const rrUpRaw = url.searchParams.get('rrUp')
+  const RR_UP = (rrUpRaw !== null && Number(rrUpRaw) > 0) ? Number(rrUpRaw) : DEFAULT_RR
+
+  const rrDownRaw = url.searchParams.get('rrDown')
+  const RR_DOWN = (rrDownRaw !== null && Number(rrDownRaw) > 0) ? Number(rrDownRaw) : DEFAULT_RR
+
+  const domUpRaw = url.searchParams.get('domUp')
+  const DOM_UP = (domUpRaw !== null && Number(domUpRaw) >= 0 && Number(domUpRaw) < 1)
+    ? Number(domUpRaw)
     : DEFAULT_DOMINANCE_MIN
 
-  const atrMultRaw = url.searchParams.get('atrMult')
-  const IMPULSE_ATR_MULT = (atrMultRaw !== null && Number(atrMultRaw) > 0)
-    ? Number(atrMultRaw)
+  const domDownRaw = url.searchParams.get('domDown')
+  const DOM_DOWN = (domDownRaw !== null && Number(domDownRaw) >= 0 && Number(domDownRaw) < 1)
+    ? Number(domDownRaw)
+    : DEFAULT_DOMINANCE_MIN
+
+  const atrMultUpRaw = url.searchParams.get('atrMultUp')
+  const ATR_MULT_UP = (atrMultUpRaw !== null && Number(atrMultUpRaw) > 0)
+    ? Number(atrMultUpRaw)
     : DEFAULT_IMPULSE_ATR_MULT
+
+  const atrMultDownRaw = url.searchParams.get('atrMultDown')
+  const ATR_MULT_DOWN = (atrMultDownRaw !== null && Number(atrMultDownRaw) > 0)
+    ? Number(atrMultDownRaw)
+    : DEFAULT_IMPULSE_ATR_MULT
+
+  const oiDropRaw = url.searchParams.get('oiDrop')
+  const OI_DROP_PCT = (oiDropRaw !== null && Number(oiDropRaw) > 0) ? Number(oiDropRaw) : DEFAULT_OI_DROP_PCT
 
   const allowed = ['BTCUSDT', 'ETHUSDT']
   if (!allowed.includes(symbol)) {
@@ -331,31 +366,41 @@ export async function GET(req: Request) {
 
     for (let i = ATR_PERIOD + LOOKBACK_BARS; i < bars.length - SQUEEZE_TTL_BARS - MAX_BARS_TO_RESOLVE; i++) {
       if (i - lastTriggerIdx < COOLDOWN_BARS_AFTER_TRIGGER) continue
-      const trigger = detectSqueezeAt(bars, atr, i, DELTA_DOMINANCE_MIN, IMPULSE_ATR_MULT)
+      const trigger = detectSqueezeAt(bars, atr, i, DOM_UP, DOM_DOWN, ATR_MULT_UP, ATR_MULT_DOWN, OI_DROP_PCT)
       if (trigger) {
         triggers.push(trigger)
         lastTriggerIdx = i
       }
     }
 
-    const events = triggers.map(t => resolveSqueezeTrade(bars, t, SQUEEZE_TTL_BARS, RR))
+    const events = triggers.map(t => resolveSqueezeTrade(bars, t, SQUEEZE_TTL_BARS, RR_UP, RR_DOWN))
     const confirmed = events.filter(e => e.confirmed)
 
     const results: SqueezeBacktestResults = {
       generatedAt: new Date().toISOString(),
       symbol,
       timeframe: tf,
-      paramsUsed: { rr: RR, cooldown: COOLDOWN_BARS_AFTER_TRIGGER, ttl: SQUEEZE_TTL_BARS, dom: DELTA_DOMINANCE_MIN, atrMult: IMPULSE_ATR_MULT },
+      paramsUsed: {
+        cooldown: COOLDOWN_BARS_AFTER_TRIGGER,
+        ttl: SQUEEZE_TTL_BARS,
+        rrUp: RR_UP,
+        rrDown: RR_DOWN,
+        domUp: DOM_UP,
+        domDown: DOM_DOWN,
+        atrMultUp: ATR_MULT_UP,
+        atrMultDown: ATR_MULT_DOWN,
+        oiDrop: OI_DROP_PCT,
+      },
       totalBars: bars.length,
       totalTriggers: triggers.length,
       totalConfirmed: confirmed.length,
       confirmationRatePct: triggers.length > 0
         ? Math.round((confirmed.length / triggers.length) * 1000) / 10
         : 0,
-      overall: calcStats(events, RR),
+      overall: calcStats(events),
       byDirection: {
-        up_to_sell: calcStats(events.filter(e => e.direction === 'up'), RR),
-        down_to_buy: calcStats(events.filter(e => e.direction === 'down'), RR),
+        up_to_sell: calcStats(events.filter(e => e.direction === 'up')),
+        down_to_buy: calcStats(events.filter(e => e.direction === 'down')),
       },
       events: events.slice(-300),
     }
