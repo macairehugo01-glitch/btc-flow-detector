@@ -24,6 +24,8 @@ const DEFAULT_TTL_BARS = 8
 const DEFAULT_DOMINANCE_MIN = 0.5
 const DEFAULT_IMPULSE_ATR_MULT = 1.3
 const DEFAULT_OI_DROP_PCT = 1.5
+const DEFAULT_MAG_MIN_UP = 0
+const DEFAULT_MAG_MIN_DOWN = 0
 
 const LOOKBACK_BARS = 5
 const ATR_PERIOD = 14
@@ -71,6 +73,8 @@ type SqueezeBacktestResults = {
     atrMultUp: number
     atrMultDown: number
     oiDrop: number
+    magUp: number
+    magDown: number
   }
   totalBars: number
   totalTriggers: number
@@ -151,7 +155,9 @@ function detectSqueezeAt(
   domMinDown: number,
   atrMultUp: number,
   atrMultDown: number,
-  oiDropPct: number
+  oiDropPct: number,
+  magMinUp: number,
+  magMinDown: number
 ): Trigger | null {
   const startIdx = i - LOOKBACK_BARS + 1
   if (startIdx < ATR_PERIOD) return null
@@ -161,9 +167,16 @@ function detectSqueezeAt(
 
   const priceMove = endBar.close - startBar.close
   const direction: SqueezeDirection = priceMove > 0 ? 'up' : 'down'
+  const priceMovePct = (priceMove / startBar.close) * 100
+
   const impulseAtrMult = direction === 'up' ? atrMultUp : atrMultDown
   const impulseOk = Math.abs(priceMove) > impulseAtrMult * atr[i]
   if (!impulseOk) return null
+
+  // Filtre de magnitude minimale (en %) — testé pour corriger DOWN→BUY,
+  // exploratoire avait montré que les mouvements >2.5% avaient 66.7% WR
+  const magMin = direction === 'up' ? magMinUp : magMinDown
+  if (Math.abs(priceMovePct) < magMin) return null
 
   const oiStart = startBar.oi
   const oiEnd = endBar.oi
@@ -183,7 +196,7 @@ function detectSqueezeAt(
     time: endBar.time,
     direction,
     priceMove,
-    priceMovePct: (priceMove / startBar.close) * 100,
+    priceMovePct,
     oiChangePct,
     dominance,
     atrAtTrigger: atr[i],
@@ -299,8 +312,8 @@ export async function GET(req: Request) {
 
   // Tous les paramètres sont résolus en variables LOCALES à cette requête —
   // aucune mutation d'état partagé entre requêtes (fix du bug dom=0).
-  // RR, dom et atrMult sont désormais séparés par direction (UP/SELL vs DOWN/BUY).
-  // cooldown, ttl et oiDrop restent globaux (rien n'indique qu'ils doivent diverger).
+  // RR, dom, atrMult et désormais le filtre de magnitude sont séparés par
+  // direction (UP/SELL vs DOWN/BUY). cooldown, ttl et oiDrop restent globaux.
 
   const cooldownRaw = url.searchParams.get('cooldown')
   const COOLDOWN_BARS_AFTER_TRIGGER = (cooldownRaw !== null && Number(cooldownRaw) >= 0)
@@ -339,6 +352,12 @@ export async function GET(req: Request) {
   const oiDropRaw = url.searchParams.get('oiDrop')
   const OI_DROP_PCT = (oiDropRaw !== null && Number(oiDropRaw) > 0) ? Number(oiDropRaw) : DEFAULT_OI_DROP_PCT
 
+  const magUpRaw = url.searchParams.get('magUp')
+  const MAG_MIN_UP = (magUpRaw !== null && Number(magUpRaw) >= 0) ? Number(magUpRaw) : DEFAULT_MAG_MIN_UP
+
+  const magDownRaw = url.searchParams.get('magDown')
+  const MAG_MIN_DOWN = (magDownRaw !== null && Number(magDownRaw) >= 0) ? Number(magDownRaw) : DEFAULT_MAG_MIN_DOWN
+
   const allowed = ['BTCUSDT', 'ETHUSDT']
   if (!allowed.includes(symbol)) {
     return NextResponse.json({ error: `Symbole non supporté: ${symbol}` }, { status: 400 })
@@ -366,7 +385,13 @@ export async function GET(req: Request) {
 
     for (let i = ATR_PERIOD + LOOKBACK_BARS; i < bars.length - SQUEEZE_TTL_BARS - MAX_BARS_TO_RESOLVE; i++) {
       if (i - lastTriggerIdx < COOLDOWN_BARS_AFTER_TRIGGER) continue
-      const trigger = detectSqueezeAt(bars, atr, i, DOM_UP, DOM_DOWN, ATR_MULT_UP, ATR_MULT_DOWN, OI_DROP_PCT)
+      const trigger = detectSqueezeAt(
+        bars, atr, i,
+        DOM_UP, DOM_DOWN,
+        ATR_MULT_UP, ATR_MULT_DOWN,
+        OI_DROP_PCT,
+        MAG_MIN_UP, MAG_MIN_DOWN
+      )
       if (trigger) {
         triggers.push(trigger)
         lastTriggerIdx = i
@@ -390,6 +415,8 @@ export async function GET(req: Request) {
         atrMultUp: ATR_MULT_UP,
         atrMultDown: ATR_MULT_DOWN,
         oiDrop: OI_DROP_PCT,
+        magUp: MAG_MIN_UP,
+        magDown: MAG_MIN_DOWN,
       },
       totalBars: bars.length,
       totalTriggers: triggers.length,
