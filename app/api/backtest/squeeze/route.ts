@@ -26,6 +26,7 @@ const DEFAULT_IMPULSE_ATR_MULT = 1.3
 const DEFAULT_OI_DROP_PCT = 1.5
 const DEFAULT_MAG_MIN_UP = 0
 const DEFAULT_MAG_MIN_DOWN = 0
+const DEFAULT_SWING_LOOKBACK = 5
 
 const LOOKBACK_BARS = 5
 const ATR_PERIOD = 14
@@ -38,6 +39,7 @@ const MAX_BARS_TO_RESOLVE = 16
 
 type SqueezeDirection = 'up' | 'down'
 type SqueezeOutcome = 'win' | 'loss' | 'breakeven' | 'no_confirmation'
+type TrendRegime = 'up' | 'down' | 'undefined'
 
 type SqueezeEvent = {
   triggerTime: number
@@ -46,6 +48,7 @@ type SqueezeEvent = {
   oiChangePct: number
   dominance: number
   atrAtTrigger: number
+  trend: TrendRegime
   confirmed: boolean
   barsToConfirm?: number
   action?: 'BUY' | 'SELL'
@@ -58,6 +61,11 @@ type SqueezeEvent = {
 }
 
 type StatBlock = { trades: number; wins: number; winRate: number; avgR: number; expectancy: number }
+
+type DirectionBreakdown = {
+  up_to_sell: StatBlock
+  down_to_buy: StatBlock
+}
 
 type SqueezeBacktestResults = {
   generatedAt: string
@@ -75,15 +83,18 @@ type SqueezeBacktestResults = {
     oiDrop: number
     magUp: number
     magDown: number
+    swingLookback: number
   }
   totalBars: number
   totalTriggers: number
   totalConfirmed: number
   confirmationRatePct: number
   overall: StatBlock
-  byDirection: {
-    up_to_sell: StatBlock
-    down_to_buy: StatBlock
+  byDirection: DirectionBreakdown
+  byRegime: {
+    up: DirectionBreakdown
+    down: DirectionBreakdown
+    undefined: DirectionBreakdown
   }
   events: SqueezeEvent[]
 }
@@ -136,6 +147,85 @@ function deltaDominanceOverWindow(bars: RawBar[], startIdx: number, endIdx: numb
   return grossVol > 0 ? netVol / grossVol : 0
 }
 
+// ─── THÉORIE DE DOW : DÉTECTION DE RÉGIME DE TENDANCE ────────────────────────
+// Un swing n'est confirmé qu'après `lookback` bougies supplémentaires —
+// aucune information du futur n'est utilisée au moment de la classification.
+// La tendance reste en vigueur jusqu'à preuve du contraire (signal mixte =
+// la tendance précédente continue), conformément au principe de Dow.
+
+type SwingPoint = { idx: number; price: number; confirmedAt: number }
+
+function computeSwingPoints(bars: RawBar[], lookback: number): { highs: SwingPoint[]; lows: SwingPoint[] } {
+  const highs: SwingPoint[] = []
+  const lows: SwingPoint[] = []
+  for (let i = lookback; i < bars.length - lookback; i++) {
+    const windowBars = bars.slice(i - lookback, i + lookback + 1)
+    const maxHigh = Math.max(...windowBars.map(b => b.high))
+    const minLow = Math.min(...windowBars.map(b => b.low))
+    if (bars[i].high === maxHigh) {
+      highs.push({ idx: i, price: bars[i].high, confirmedAt: i + lookback })
+    }
+    if (bars[i].low === minLow) {
+      lows.push({ idx: i, price: bars[i].low, confirmedAt: i + lookback })
+    }
+  }
+  return { highs, lows }
+}
+
+function computeDowTrendLabels(bars: RawBar[], highs: SwingPoint[], lows: SwingPoint[]): TrendRegime[] {
+  const labels: TrendRegime[] = new Array(bars.length).fill('undefined')
+
+  type SwingEvent = { confirmedAt: number; type: 'high' | 'low'; point: SwingPoint }
+  const events: SwingEvent[] = [
+    ...highs.map(h => ({ confirmedAt: h.confirmedAt, type: 'high' as const, point: h })),
+    ...lows.map(l => ({ confirmedAt: l.confirmedAt, type: 'low' as const, point: l })),
+  ].sort((a, b) => a.confirmedAt - b.confirmedAt)
+
+  let lastHigh: SwingPoint | null = null
+  let prevHigh: SwingPoint | null = null
+  let lastLow: SwingPoint | null = null
+  let prevLow: SwingPoint | null = null
+  let currentTrend: TrendRegime = 'undefined'
+  let filledUpTo = 0
+
+  for (const ev of events) {
+    const fillEnd = Math.min(ev.confirmedAt, bars.length)
+    for (let i = filledUpTo; i < fillEnd; i++) {
+      labels[i] = currentTrend
+    }
+    filledUpTo = fillEnd
+
+    if (ev.type === 'high') {
+      prevHigh = lastHigh
+      lastHigh = ev.point
+    } else {
+      prevLow = lastLow
+      lastLow = ev.point
+    }
+
+    if (lastHigh && prevHigh && lastLow && prevLow) {
+      const higherHigh = lastHigh.price > prevHigh.price
+      const higherLow = lastLow.price > prevLow.price
+      const lowerHigh = lastHigh.price < prevHigh.price
+      const lowerLow = lastLow.price < prevLow.price
+
+      if (higherHigh && higherLow) {
+        currentTrend = 'up'
+      } else if (lowerHigh && lowerLow) {
+        currentTrend = 'down'
+      }
+      // Signal mixte (ex: HH+LL ou LH+HL) : la tendance en cours n'est pas
+      // remise en cause — elle continue jusqu'à une cassure nette.
+    }
+  }
+
+  for (let i = filledUpTo; i < bars.length; i++) {
+    labels[i] = currentTrend
+  }
+
+  return labels
+}
+
 type Trigger = {
   triggerIdx: number
   time: number
@@ -145,11 +235,13 @@ type Trigger = {
   oiChangePct: number
   dominance: number
   atrAtTrigger: number
+  trend: TrendRegime
 }
 
 function detectSqueezeAt(
   bars: RawBar[],
   atr: number[],
+  trendLabels: TrendRegime[],
   i: number,
   domMinUp: number,
   domMinDown: number,
@@ -173,8 +265,6 @@ function detectSqueezeAt(
   const impulseOk = Math.abs(priceMove) > impulseAtrMult * atr[i]
   if (!impulseOk) return null
 
-  // Filtre de magnitude minimale (en %) — testé pour corriger DOWN→BUY,
-  // exploratoire avait montré que les mouvements >2.5% avaient 66.7% WR
   const magMin = direction === 'up' ? magMinUp : magMinDown
   if (Math.abs(priceMovePct) < magMin) return null
 
@@ -200,6 +290,7 @@ function detectSqueezeAt(
     oiChangePct,
     dominance,
     atrAtTrigger: atr[i],
+    trend: trendLabels[i],
   }
 }
 
@@ -243,6 +334,7 @@ function resolveSqueezeTrade(
     oiChangePct: Math.round(trigger.oiChangePct * 1000) / 1000,
     dominance: Math.round(trigger.dominance * 1000) / 1000,
     atrAtTrigger: trigger.atrAtTrigger,
+    trend: trigger.trend,
   }
 
   if (confirmBarIdx === -1) {
@@ -303,17 +395,19 @@ function calcStats(events: SqueezeEvent[]): StatBlock {
   }
 }
 
+function calcDirectionBreakdown(events: SqueezeEvent[]): DirectionBreakdown {
+  return {
+    up_to_sell: calcStats(events.filter(e => e.direction === 'up')),
+    down_to_buy: calcStats(events.filter(e => e.direction === 'down')),
+  }
+}
+
 // ─── HANDLER ─────────────────────────────────────────────────────────────────
 
 export async function GET(req: Request) {
   const url = new URL(req.url)
   const symbol = (url.searchParams.get('symbol') ?? 'BTCUSDT').toUpperCase()
   const tf = url.searchParams.get('tf') ?? '1h'
-
-  // Tous les paramètres sont résolus en variables LOCALES à cette requête —
-  // aucune mutation d'état partagé entre requêtes (fix du bug dom=0).
-  // RR, dom, atrMult et désormais le filtre de magnitude sont séparés par
-  // direction (UP/SELL vs DOWN/BUY). cooldown, ttl et oiDrop restent globaux.
 
   const cooldownRaw = url.searchParams.get('cooldown')
   const COOLDOWN_BARS_AFTER_TRIGGER = (cooldownRaw !== null && Number(cooldownRaw) >= 0)
@@ -358,6 +452,11 @@ export async function GET(req: Request) {
   const magDownRaw = url.searchParams.get('magDown')
   const MAG_MIN_DOWN = (magDownRaw !== null && Number(magDownRaw) >= 0) ? Number(magDownRaw) : DEFAULT_MAG_MIN_DOWN
 
+  const swingLookbackRaw = url.searchParams.get('swingLookback')
+  const SWING_LOOKBACK = (swingLookbackRaw !== null && Number(swingLookbackRaw) > 0)
+    ? Number(swingLookbackRaw)
+    : DEFAULT_SWING_LOOKBACK
+
   const allowed = ['BTCUSDT', 'ETHUSDT']
   if (!allowed.includes(symbol)) {
     return NextResponse.json({ error: `Symbole non supporté: ${symbol}` }, { status: 400 })
@@ -380,13 +479,16 @@ export async function GET(req: Request) {
     const bars: RawBar[] = JSON.parse(fs.readFileSync(fileToUse, 'utf-8'))
     const atr = computeATR(bars, ATR_PERIOD)
 
+    const { highs, lows } = computeSwingPoints(bars, SWING_LOOKBACK)
+    const trendLabels = computeDowTrendLabels(bars, highs, lows)
+
     const triggers: Trigger[] = []
     let lastTriggerIdx = -Infinity
 
     for (let i = ATR_PERIOD + LOOKBACK_BARS; i < bars.length - SQUEEZE_TTL_BARS - MAX_BARS_TO_RESOLVE; i++) {
       if (i - lastTriggerIdx < COOLDOWN_BARS_AFTER_TRIGGER) continue
       const trigger = detectSqueezeAt(
-        bars, atr, i,
+        bars, atr, trendLabels, i,
         DOM_UP, DOM_DOWN,
         ATR_MULT_UP, ATR_MULT_DOWN,
         OI_DROP_PCT,
@@ -417,6 +519,7 @@ export async function GET(req: Request) {
         oiDrop: OI_DROP_PCT,
         magUp: MAG_MIN_UP,
         magDown: MAG_MIN_DOWN,
+        swingLookback: SWING_LOOKBACK,
       },
       totalBars: bars.length,
       totalTriggers: triggers.length,
@@ -425,9 +528,11 @@ export async function GET(req: Request) {
         ? Math.round((confirmed.length / triggers.length) * 1000) / 10
         : 0,
       overall: calcStats(events),
-      byDirection: {
-        up_to_sell: calcStats(events.filter(e => e.direction === 'up')),
-        down_to_buy: calcStats(events.filter(e => e.direction === 'down')),
+      byDirection: calcDirectionBreakdown(events),
+      byRegime: {
+        up: calcDirectionBreakdown(events.filter(e => e.trend === 'up')),
+        down: calcDirectionBreakdown(events.filter(e => e.trend === 'down')),
+        undefined: calcDirectionBreakdown(events.filter(e => e.trend === 'undefined')),
       },
       events: events.slice(-300),
     }
