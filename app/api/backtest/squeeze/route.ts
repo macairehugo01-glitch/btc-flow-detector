@@ -84,6 +84,8 @@ type SqueezeBacktestResults = {
     magUp: number
     magDown: number
     swingLookback: number
+    barStart: number
+    barEnd: number | null
   }
   totalBars: number
   totalTriggers: number
@@ -457,6 +459,15 @@ export async function GET(req: Request) {
     ? Number(swingLookbackRaw)
     : DEFAULT_SWING_LOOKBACK
 
+  // Découpage temporel pour validation out-of-sample (calibrer sur une
+  // moitié, valider sur l'autre). Indices dans le tableau de bougies,
+  // comme un slice JS classique : [barStart, barEnd).
+  const barStartRaw = url.searchParams.get('barStart')
+  const BAR_START = (barStartRaw !== null && Number(barStartRaw) >= 0) ? Number(barStartRaw) : 0
+
+  const barEndRaw = url.searchParams.get('barEnd')
+  const BAR_END = (barEndRaw !== null && Number(barEndRaw) > 0) ? Number(barEndRaw) : undefined
+
   const allowed = ['BTCUSDT', 'ETHUSDT']
   if (!allowed.includes(symbol)) {
     return NextResponse.json({ error: `Symbole non supporté: ${symbol}` }, { status: 400 })
@@ -476,7 +487,8 @@ export async function GET(req: Request) {
   }
 
   try {
-    const bars: RawBar[] = JSON.parse(fs.readFileSync(fileToUse, 'utf-8'))
+    const allBars: RawBar[] = JSON.parse(fs.readFileSync(fileToUse, 'utf-8'))
+    const bars: RawBar[] = allBars.slice(BAR_START, BAR_END)
     const atr = computeATR(bars, ATR_PERIOD)
 
     const { highs, lows } = computeSwingPoints(bars, SWING_LOOKBACK)
@@ -520,6 +532,8 @@ export async function GET(req: Request) {
         magUp: MAG_MIN_UP,
         magDown: MAG_MIN_DOWN,
         swingLookback: SWING_LOOKBACK,
+        barStart: BAR_START,
+        barEnd: BAR_END ?? null,
       },
       totalBars: bars.length,
       totalTriggers: triggers.length,
