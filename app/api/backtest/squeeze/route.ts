@@ -28,12 +28,12 @@ const DEFAULT_MAG_MIN_UP = 0
 const DEFAULT_MAG_MIN_DOWN = 0
 const DEFAULT_SWING_LOOKBACK = 5
 
-const LOOKBACK_BARS = 5
-const ATR_PERIOD = 14
+const DEFAULT_LOOKBACK_BARS = 5
+const DEFAULT_ATR_PERIOD = 14
 const CONFIRM_BARS = 2
-const VWAP_WINDOW = 50
+const DEFAULT_VWAP_WINDOW = 50
 const SL_BUFFER_PCT = 0.002
-const MAX_BARS_TO_RESOLVE = 16
+const DEFAULT_MAX_BARS_TO_RESOLVE = 16
 
 // ─── TYPES ───────────────────────────────────────────────────────────────────
 
@@ -86,6 +86,10 @@ type SqueezeBacktestResults = {
     swingLookback: number
     barStart: number
     barEnd: number | null
+    lookbackBars: number
+    atrPeriod: number
+    vwapWindow: number
+    maxBarsToResolve: number
   }
   totalBars: number
   totalTriggers: number
@@ -127,8 +131,8 @@ function computeATR(bars: RawBar[], period: number): number[] {
   return atr
 }
 
-function computeVWAPAt(bars: RawBar[], i: number): number {
-  const window = bars.slice(Math.max(0, i - VWAP_WINDOW), i + 1)
+function computeVWAPAt(bars: RawBar[], i: number, vwapWindow: number): number {
+  const window = bars.slice(Math.max(0, i - vwapWindow), i + 1)
   let pv = 0, vol = 0
   for (const b of window) {
     const typical = (b.high + b.low + b.close) / 3
@@ -251,10 +255,12 @@ function detectSqueezeAt(
   atrMultDown: number,
   oiDropPct: number,
   magMinUp: number,
-  magMinDown: number
+  magMinDown: number,
+  lookbackBars: number,
+  atrPeriod: number
 ): Trigger | null {
-  const startIdx = i - LOOKBACK_BARS + 1
-  if (startIdx < ATR_PERIOD) return null
+  const startIdx = i - lookbackBars + 1
+  if (startIdx < atrPeriod) return null
 
   const startBar = bars[startIdx]
   const endBar = bars[i]
@@ -301,11 +307,14 @@ function resolveSqueezeTrade(
   trigger: Trigger,
   ttlBars: number,
   rrUp: number,
-  rrDown: number
+  rrDown: number,
+  lookbackBars: number,
+  vwapWindow: number,
+  maxBarsToResolve: number
 ): SqueezeEvent {
   const rr = trigger.direction === 'up' ? rrUp : rrDown
   const i = trigger.triggerIdx
-  const windowStart = i - LOOKBACK_BARS + 1
+  const windowStart = i - lookbackBars + 1
   const windowBars = bars.slice(windowStart, i + 1)
   const windowHigh = Math.max(...windowBars.map(b => b.high))
   const windowLow = Math.min(...windowBars.map(b => b.low))
@@ -314,7 +323,7 @@ function resolveSqueezeTrade(
   let confirmBarIdx = -1
 
   for (let j = i + 1; j < Math.min(i + 1 + ttlBars, bars.length); j++) {
-    const vwapJ = computeVWAPAt(bars, j)
+    const vwapJ = computeVWAPAt(bars, j, vwapWindow)
     const closeJ = bars[j].close
     const onOppositeSide = trigger.direction === 'up' ? closeJ < vwapJ : closeJ > vwapJ
 
@@ -357,7 +366,7 @@ function resolveSqueezeTrade(
   let rMultiple = 0
   let barsToClose = 0
 
-  for (let j = confirmBarIdx + 1; j < Math.min(confirmBarIdx + 1 + MAX_BARS_TO_RESOLVE, bars.length); j++) {
+  for (let j = confirmBarIdx + 1; j < Math.min(confirmBarIdx + 1 + maxBarsToResolve, bars.length); j++) {
     const b = bars[j]
     barsToClose = j - confirmBarIdx
     if (action === 'SELL') {
@@ -459,6 +468,29 @@ export async function GET(req: Request) {
     ? Number(swingLookbackRaw)
     : DEFAULT_SWING_LOOKBACK
 
+  // Paramètres structurels (durée d'impulsion, période ATR, fenêtre VWAP,
+  // délai max de résolution) — configurables pour le rescaling temporel
+  // entre timeframes (ex: ×4 pour passer de 1h à M15 à durée réelle égale).
+  const lookbackBarsRaw = url.searchParams.get('lookbackBars')
+  const LOOKBACK_BARS = (lookbackBarsRaw !== null && Number(lookbackBarsRaw) > 0)
+    ? Number(lookbackBarsRaw)
+    : DEFAULT_LOOKBACK_BARS
+
+  const atrPeriodRaw = url.searchParams.get('atrPeriod')
+  const ATR_PERIOD = (atrPeriodRaw !== null && Number(atrPeriodRaw) > 0)
+    ? Number(atrPeriodRaw)
+    : DEFAULT_ATR_PERIOD
+
+  const vwapWindowRaw = url.searchParams.get('vwapWindow')
+  const VWAP_WINDOW = (vwapWindowRaw !== null && Number(vwapWindowRaw) > 0)
+    ? Number(vwapWindowRaw)
+    : DEFAULT_VWAP_WINDOW
+
+  const maxBarsToResolveRaw = url.searchParams.get('maxBarsToResolve')
+  const MAX_BARS_TO_RESOLVE = (maxBarsToResolveRaw !== null && Number(maxBarsToResolveRaw) > 0)
+    ? Number(maxBarsToResolveRaw)
+    : DEFAULT_MAX_BARS_TO_RESOLVE
+
   // Découpage temporel pour validation out-of-sample (calibrer sur une
   // moitié, valider sur l'autre). Indices dans le tableau de bougies,
   // comme un slice JS classique : [barStart, barEnd).
@@ -504,7 +536,8 @@ export async function GET(req: Request) {
         DOM_UP, DOM_DOWN,
         ATR_MULT_UP, ATR_MULT_DOWN,
         OI_DROP_PCT,
-        MAG_MIN_UP, MAG_MIN_DOWN
+        MAG_MIN_UP, MAG_MIN_DOWN,
+        LOOKBACK_BARS, ATR_PERIOD
       )
       if (trigger) {
         triggers.push(trigger)
@@ -512,7 +545,10 @@ export async function GET(req: Request) {
       }
     }
 
-    const events = triggers.map(t => resolveSqueezeTrade(bars, t, SQUEEZE_TTL_BARS, RR_UP, RR_DOWN))
+    const events = triggers.map(t => resolveSqueezeTrade(
+      bars, t, SQUEEZE_TTL_BARS, RR_UP, RR_DOWN,
+      LOOKBACK_BARS, VWAP_WINDOW, MAX_BARS_TO_RESOLVE
+    ))
     const confirmed = events.filter(e => e.confirmed)
 
     const results: SqueezeBacktestResults = {
@@ -534,6 +570,10 @@ export async function GET(req: Request) {
         swingLookback: SWING_LOOKBACK,
         barStart: BAR_START,
         barEnd: BAR_END ?? null,
+        lookbackBars: LOOKBACK_BARS,
+        atrPeriod: ATR_PERIOD,
+        vwapWindow: VWAP_WINDOW,
+        maxBarsToResolve: MAX_BARS_TO_RESOLVE,
       },
       totalBars: bars.length,
       totalTriggers: triggers.length,
