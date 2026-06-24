@@ -17,17 +17,18 @@ type RawBar = {
   fundingRate: number
 }
 
-// ─── SEUILS (point de départ — à ajuster selon les résultats) ───────────────
+// ─── SEUILS PAR DÉFAUT (valeurs d'origine — jamais mutées, juste lues) ───────
+const DEFAULT_RR = 3
+const DEFAULT_COOLDOWN_BARS = 12
+const DEFAULT_TTL_BARS = 8
+const DEFAULT_DOMINANCE_MIN = 0.5
+const DEFAULT_IMPULSE_ATR_MULT = 1.3
+
 const LOOKBACK_BARS = 5
-const IMPULSE_ATR_MULT = 1.3
 const ATR_PERIOD = 14
-const OI_DROP_PCT = 1.5          // OI doit baisser d'au moins 1.5% sur la fenêtre
-let DELTA_DOMINANCE_MIN = 0.55   // proxy : volume net directionnel / volume brut — ajustable via ?dom=
-const CONFIRM_BARS = 2           // clôtures consécutives de l'autre côté de la VWAP
-let SQUEEZE_TTL_BARS = 8         // fenêtre pour que la confirmation arrive — ajustable via ?ttl=
+const OI_DROP_PCT = 1.5
+const CONFIRM_BARS = 2
 const VWAP_WINDOW = 50
-let COOLDOWN_BARS_AFTER_TRIGGER = 12 // anti-doublon — ajustable via ?cooldown= dans l'URL pour tester
-let RR = 3                       // ajustable via ?rr= dans l'URL pour tester
 const SL_BUFFER_PCT = 0.002
 const MAX_BARS_TO_RESOLVE = 16
 
@@ -60,6 +61,7 @@ type SqueezeBacktestResults = {
   generatedAt: string
   symbol: string
   timeframe: string
+  paramsUsed: { rr: number; cooldown: number; ttl: number; dom: number; atrMult: number }
   totalBars: number
   totalTriggers: number
   totalConfirmed: number
@@ -110,8 +112,6 @@ function computeVWAPAt(bars: RawBar[], i: number): number {
 }
 
 function deltaDominanceOverWindow(bars: RawBar[], startIdx: number, endIdx: number): number {
-  // Proxy : pas de takerBuyVolume réel dans les données de backtest Bybit,
-  // donc dominance approximée par le volume pondéré par le sens de la bougie.
   let netVol = 0, grossVol = 0
   for (let i = startIdx; i <= endIdx; i++) {
     const b = bars[i]
@@ -133,7 +133,13 @@ type Trigger = {
   atrAtTrigger: number
 }
 
-function detectSqueezeAt(bars: RawBar[], atr: number[], i: number): Trigger | null {
+function detectSqueezeAt(
+  bars: RawBar[],
+  atr: number[],
+  i: number,
+  deltaDominanceMin: number,
+  impulseAtrMult: number
+): Trigger | null {
   const startIdx = i - LOOKBACK_BARS + 1
   if (startIdx < ATR_PERIOD) return null
 
@@ -141,7 +147,7 @@ function detectSqueezeAt(bars: RawBar[], atr: number[], i: number): Trigger | nu
   const endBar = bars[i]
 
   const priceMove = endBar.close - startBar.close
-  const impulseOk = Math.abs(priceMove) > IMPULSE_ATR_MULT * atr[i]
+  const impulseOk = Math.abs(priceMove) > impulseAtrMult * atr[i]
   if (!impulseOk) return null
 
   const oiStart = startBar.oi
@@ -154,8 +160,8 @@ function detectSqueezeAt(bars: RawBar[], atr: number[], i: number): Trigger | nu
   const dominance = deltaDominanceOverWindow(bars, startIdx, i)
   const direction: SqueezeDirection = priceMove > 0 ? 'up' : 'down'
 
-  if (direction === 'up' && dominance < DELTA_DOMINANCE_MIN) return null
-  if (direction === 'down' && dominance > -DELTA_DOMINANCE_MIN) return null
+  if (direction === 'up' && dominance < deltaDominanceMin) return null
+  if (direction === 'down' && dominance > -deltaDominanceMin) return null
 
   return {
     triggerIdx: i,
@@ -169,7 +175,12 @@ function detectSqueezeAt(bars: RawBar[], atr: number[], i: number): Trigger | nu
   }
 }
 
-function resolveSqueezeTrade(bars: RawBar[], trigger: Trigger): SqueezeEvent {
+function resolveSqueezeTrade(
+  bars: RawBar[],
+  trigger: Trigger,
+  ttlBars: number,
+  rr: number
+): SqueezeEvent {
   const i = trigger.triggerIdx
   const windowStart = i - LOOKBACK_BARS + 1
   const windowBars = bars.slice(windowStart, i + 1)
@@ -179,7 +190,7 @@ function resolveSqueezeTrade(bars: RawBar[], trigger: Trigger): SqueezeEvent {
   let consecutiveCount = 0
   let confirmBarIdx = -1
 
-  for (let j = i + 1; j < Math.min(i + 1 + SQUEEZE_TTL_BARS, bars.length); j++) {
+  for (let j = i + 1; j < Math.min(i + 1 + ttlBars, bars.length); j++) {
     const vwapJ = computeVWAPAt(bars, j)
     const closeJ = bars[j].close
     const onOppositeSide = trigger.direction === 'up' ? closeJ < vwapJ : closeJ > vwapJ
@@ -216,7 +227,7 @@ function resolveSqueezeTrade(bars: RawBar[], trigger: Trigger): SqueezeEvent {
     : windowLow * (1 - SL_BUFFER_PCT)
 
   const risk = Math.abs(entryPrice - slPrice)
-  const tpPrice = action === 'SELL' ? entryPrice - risk * RR : entryPrice + risk * RR
+  const tpPrice = action === 'SELL' ? entryPrice - risk * rr : entryPrice + risk * rr
 
   let outcome: SqueezeOutcome = 'breakeven'
   let rMultiple = 0
@@ -226,10 +237,10 @@ function resolveSqueezeTrade(bars: RawBar[], trigger: Trigger): SqueezeEvent {
     const b = bars[j]
     barsToClose = j - confirmBarIdx
     if (action === 'SELL') {
-      if (b.low <= tpPrice) { outcome = 'win'; rMultiple = RR; break }
+      if (b.low <= tpPrice) { outcome = 'win'; rMultiple = rr; break }
       if (b.high >= slPrice) { outcome = 'loss'; rMultiple = -1; break }
     } else {
-      if (b.high >= tpPrice) { outcome = 'win'; rMultiple = RR; break }
+      if (b.high >= tpPrice) { outcome = 'win'; rMultiple = rr; break }
       if (b.low <= slPrice) { outcome = 'loss'; rMultiple = -1; break }
     }
   }
@@ -248,12 +259,12 @@ function resolveSqueezeTrade(bars: RawBar[], trigger: Trigger): SqueezeEvent {
   }
 }
 
-function calcStats(events: SqueezeEvent[]): StatBlock {
+function calcStats(events: SqueezeEvent[], rr: number): StatBlock {
   const closed = events.filter(e => e.outcome === 'win' || e.outcome === 'loss')
   const wins = closed.filter(e => e.outcome === 'win')
   const winRate = closed.length > 0 ? wins.length / closed.length : 0
   const avgR = closed.length > 0 ? closed.reduce((s, e) => s + e.rMultiple, 0) / closed.length : 0
-  const expectancy = winRate * RR - (1 - winRate) * 1
+  const expectancy = winRate * rr - (1 - winRate) * 1
   return {
     trades: closed.length,
     wins: wins.length,
@@ -270,17 +281,28 @@ export async function GET(req: Request) {
   const symbol = (url.searchParams.get('symbol') ?? 'BTCUSDT').toUpperCase()
   const tf = url.searchParams.get('tf') ?? '1h'
 
-  const rrParam = Number(url.searchParams.get('rr'))
-  if (rrParam > 0) RR = rrParam
+  // Tous les paramètres sont résolus en variables LOCALES à cette requête —
+  // aucune mutation d'état partagé entre requêtes (fix du bug dom=0).
+  const rrRaw = url.searchParams.get('rr')
+  const RR = (rrRaw !== null && Number(rrRaw) > 0) ? Number(rrRaw) : DEFAULT_RR
 
-  const cooldownParam = url.searchParams.get('cooldown')
-  if (cooldownParam !== null && Number(cooldownParam) >= 0) COOLDOWN_BARS_AFTER_TRIGGER = Number(cooldownParam)
+  const cooldownRaw = url.searchParams.get('cooldown')
+  const COOLDOWN_BARS_AFTER_TRIGGER = (cooldownRaw !== null && Number(cooldownRaw) >= 0)
+    ? Number(cooldownRaw)
+    : DEFAULT_COOLDOWN_BARS
 
-  const ttlParam = Number(url.searchParams.get('ttl'))
-  if (ttlParam > 0) SQUEEZE_TTL_BARS = ttlParam
+  const ttlRaw = url.searchParams.get('ttl')
+  const SQUEEZE_TTL_BARS = (ttlRaw !== null && Number(ttlRaw) > 0) ? Number(ttlRaw) : DEFAULT_TTL_BARS
 
-  const domParam = Number(url.searchParams.get('dom'))
-  if (domParam > 0 && domParam < 1) DELTA_DOMINANCE_MIN = domParam
+  const domRaw = url.searchParams.get('dom')
+  const DELTA_DOMINANCE_MIN = (domRaw !== null && Number(domRaw) >= 0 && Number(domRaw) < 1)
+    ? Number(domRaw)
+    : DEFAULT_DOMINANCE_MIN
+
+  const atrMultRaw = url.searchParams.get('atrMult')
+  const IMPULSE_ATR_MULT = (atrMultRaw !== null && Number(atrMultRaw) > 0)
+    ? Number(atrMultRaw)
+    : DEFAULT_IMPULSE_ATR_MULT
 
   const allowed = ['BTCUSDT', 'ETHUSDT']
   if (!allowed.includes(symbol)) {
@@ -309,30 +331,31 @@ export async function GET(req: Request) {
 
     for (let i = ATR_PERIOD + LOOKBACK_BARS; i < bars.length - SQUEEZE_TTL_BARS - MAX_BARS_TO_RESOLVE; i++) {
       if (i - lastTriggerIdx < COOLDOWN_BARS_AFTER_TRIGGER) continue
-      const trigger = detectSqueezeAt(bars, atr, i)
+      const trigger = detectSqueezeAt(bars, atr, i, DELTA_DOMINANCE_MIN, IMPULSE_ATR_MULT)
       if (trigger) {
         triggers.push(trigger)
         lastTriggerIdx = i
       }
     }
 
-    const events = triggers.map(t => resolveSqueezeTrade(bars, t))
+    const events = triggers.map(t => resolveSqueezeTrade(bars, t, SQUEEZE_TTL_BARS, RR))
     const confirmed = events.filter(e => e.confirmed)
 
     const results: SqueezeBacktestResults = {
       generatedAt: new Date().toISOString(),
       symbol,
       timeframe: tf,
+      paramsUsed: { rr: RR, cooldown: COOLDOWN_BARS_AFTER_TRIGGER, ttl: SQUEEZE_TTL_BARS, dom: DELTA_DOMINANCE_MIN, atrMult: IMPULSE_ATR_MULT },
       totalBars: bars.length,
       totalTriggers: triggers.length,
       totalConfirmed: confirmed.length,
       confirmationRatePct: triggers.length > 0
         ? Math.round((confirmed.length / triggers.length) * 1000) / 10
         : 0,
-      overall: calcStats(events),
+      overall: calcStats(events, RR),
       byDirection: {
-        up_to_sell: calcStats(events.filter(e => e.direction === 'up')),
-        down_to_buy: calcStats(events.filter(e => e.direction === 'down')),
+        up_to_sell: calcStats(events.filter(e => e.direction === 'up'), RR),
+        down_to_buy: calcStats(events.filter(e => e.direction === 'down'), RR),
       },
       events: events.slice(-300),
     }
