@@ -118,6 +118,12 @@ type SqueezeBacktestResults = {
   }
   events: SqueezeEvent[]
   crossTfAlignmentMisses?: number
+  crossTfDiagnostics?: {
+    signalBarsRange: { first: number; last: number; count: number }
+    execBarsRange: { first: number; last: number; count: number }
+    signalGapStats: ReturnType<typeof computeGapStats>
+    execGapStats: ReturnType<typeof computeGapStats>
+  }
 }
 
 // ─── CALCULS ─────────────────────────────────────────────────────────────────
@@ -508,6 +514,25 @@ function resolveSqueezeTradeCrossTf(
   }
 }
 
+function computeGapStats(bars: RawBar[], expectedSpacingSec: number): {
+  expectedSpacingSec: number
+  gapCount: number
+  exampleGaps: { afterIdx: number; prevTime: number; time: number; deltaSec: number }[]
+} {
+  let gapCount = 0
+  const exampleGaps: { afterIdx: number; prevTime: number; time: number; deltaSec: number }[] = []
+  for (let i = 1; i < bars.length; i++) {
+    const delta = bars[i].time - bars[i - 1].time
+    if (delta !== expectedSpacingSec) {
+      gapCount++
+      if (exampleGaps.length < 10) {
+        exampleGaps.push({ afterIdx: i - 1, prevTime: bars[i - 1].time, time: bars[i].time, deltaSec: delta })
+      }
+    }
+  }
+  return { expectedSpacingSec, gapCount, exampleGaps }
+}
+
 function calcStats(events: SqueezeEvent[]): StatBlock {
   const closed = events.filter(e => e.outcome === 'win' || e.outcome === 'loss')
   const wins = closed.filter(e => e.outcome === 'win')
@@ -590,9 +615,8 @@ export async function GET(req: Request) {
     : DEFAULT_SWING_LOOKBACK
 
   // Paramètres structurels (durée d'impulsion, période ATR, fenêtre VWAP,
-  // délai max de résolution, bougies de confirmation) — configurables pour
-  // le rescaling temporel entre timeframes (ex: ×4 pour passer de 1h à
-  // M15 à durée réelle égale).
+  // délai max de résolution) — configurables pour le rescaling temporel
+  // entre timeframes (ex: ×4 pour passer de 1h à M15 à durée réelle égale).
   const lookbackBarsRaw = url.searchParams.get('lookbackBars')
   const LOOKBACK_BARS = (lookbackBarsRaw !== null && Number(lookbackBarsRaw) > 0)
     ? Number(lookbackBarsRaw)
@@ -712,6 +736,7 @@ export async function GET(req: Request) {
     }
 
     let crossTfAlignmentMisses = 0
+    let crossTfDiagnostics: SqueezeBacktestResults['crossTfDiagnostics'] = undefined
 
     const events = CROSS_TF_MODE && execFileToUse
       ? (() => {
@@ -726,6 +751,15 @@ export async function GET(req: Request) {
           // donc on cherche la bougie d'exécution dont le temps correspond
           // à cette clôture (ouverture + durée), pas à l'ouverture du trigger.
           const signalBarDurationSec = bars.length > 1 ? bars[1].time - bars[0].time : 0
+          const execBarDurationSec = execBars.length > 1 ? execBars[1].time - execBars[0].time : 0
+
+          crossTfDiagnostics = {
+            signalBarsRange: { first: bars[0]?.time ?? 0, last: bars[bars.length - 1]?.time ?? 0, count: bars.length },
+            execBarsRange: { first: execBars[0]?.time ?? 0, last: execBars[execBars.length - 1]?.time ?? 0, count: execBars.length },
+            signalGapStats: computeGapStats(bars, signalBarDurationSec),
+            execGapStats: computeGapStats(execBars, execBarDurationSec),
+          }
+
           return triggers.map(t => {
             const j0 = execIndexByTime.get(t.time + signalBarDurationSec)
             if (j0 === undefined) {
@@ -800,7 +834,7 @@ export async function GET(req: Request) {
         undefined: calcDirectionBreakdown(events.filter(e => e.trend === 'undefined')),
       },
       events: events.slice(-300),
-      ...(CROSS_TF_MODE ? { crossTfAlignmentMisses } : {}),
+      ...(CROSS_TF_MODE ? { crossTfAlignmentMisses, crossTfDiagnostics } : {}),
     }
 
     const RESULTS_FILE = path.join(DATA_DIR, `squeeze-backtest-results-${symbol.toLowerCase()}-${tf}.json`)
