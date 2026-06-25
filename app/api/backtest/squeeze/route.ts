@@ -678,7 +678,7 @@ export async function GET(req: Request) {
   const barEndRaw = url.searchParams.get('barEnd')
   const BAR_END = (barEndRaw !== null && Number(barEndRaw) > 0) ? Number(barEndRaw) : undefined
 
-  const allowed = ['BTCUSDT', 'ETHUSDT']
+  const allowed = ['BTCUSDT', 'ETHUSDT', 'XRPUSDT', 'SOLUSDT']
   if (!allowed.includes(symbol)) {
     return NextResponse.json({ error: `Symbole non supporté: ${symbol}` }, { status: 400 })
   }
