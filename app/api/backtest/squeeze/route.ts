@@ -30,7 +30,7 @@ const DEFAULT_SWING_LOOKBACK = 5
 
 const DEFAULT_LOOKBACK_BARS = 5
 const DEFAULT_ATR_PERIOD = 14
-const CONFIRM_BARS = 2
+const DEFAULT_CONFIRM_BARS = 2
 const DEFAULT_VWAP_WINDOW = 50
 const SL_BUFFER_PCT = 0.002
 const DEFAULT_MAX_BARS_TO_RESOLVE = 16
@@ -90,6 +90,7 @@ type SqueezeBacktestResults = {
     atrPeriod: number
     vwapWindow: number
     maxBarsToResolve: number
+    confirmBars: number
   }
   totalBars: number
   totalTriggers: number
@@ -310,7 +311,8 @@ function resolveSqueezeTrade(
   rrDown: number,
   lookbackBars: number,
   vwapWindow: number,
-  maxBarsToResolve: number
+  maxBarsToResolve: number,
+  confirmBars: number
 ): SqueezeEvent {
   const rr = trigger.direction === 'up' ? rrUp : rrDown
   const i = trigger.triggerIdx
@@ -329,7 +331,7 @@ function resolveSqueezeTrade(
 
     if (onOppositeSide) {
       consecutiveCount++
-      if (consecutiveCount >= CONFIRM_BARS) {
+      if (consecutiveCount >= confirmBars) {
         confirmBarIdx = j
         break
       }
@@ -420,6 +422,11 @@ export async function GET(req: Request) {
   const symbol = (url.searchParams.get('symbol') ?? 'BTCUSDT').toUpperCase()
   const tf = url.searchParams.get('tf') ?? '1h'
 
+  // Tous les paramètres sont résolus en variables LOCALES à cette requête —
+  // aucune mutation d'état partagé entre requêtes (fix du bug dom=0).
+  // RR, dom, atrMult et le filtre de magnitude sont séparés par direction.
+  // cooldown, ttl, oiDrop et swingLookback restent globaux.
+
   const cooldownRaw = url.searchParams.get('cooldown')
   const COOLDOWN_BARS_AFTER_TRIGGER = (cooldownRaw !== null && Number(cooldownRaw) >= 0)
     ? Number(cooldownRaw)
@@ -469,8 +476,9 @@ export async function GET(req: Request) {
     : DEFAULT_SWING_LOOKBACK
 
   // Paramètres structurels (durée d'impulsion, période ATR, fenêtre VWAP,
-  // délai max de résolution) — configurables pour le rescaling temporel
-  // entre timeframes (ex: ×4 pour passer de 1h à M15 à durée réelle égale).
+  // délai max de résolution, bougies de confirmation) — configurables pour
+  // le rescaling temporel entre timeframes (ex: ×4 pour passer de 1h à
+  // M15 à durée réelle égale).
   const lookbackBarsRaw = url.searchParams.get('lookbackBars')
   const LOOKBACK_BARS = (lookbackBarsRaw !== null && Number(lookbackBarsRaw) > 0)
     ? Number(lookbackBarsRaw)
@@ -490,6 +498,11 @@ export async function GET(req: Request) {
   const MAX_BARS_TO_RESOLVE = (maxBarsToResolveRaw !== null && Number(maxBarsToResolveRaw) > 0)
     ? Number(maxBarsToResolveRaw)
     : DEFAULT_MAX_BARS_TO_RESOLVE
+
+  const confirmBarsRaw = url.searchParams.get('confirmBars')
+  const CONFIRM_BARS = (confirmBarsRaw !== null && Number(confirmBarsRaw) > 0)
+    ? Number(confirmBarsRaw)
+    : DEFAULT_CONFIRM_BARS
 
   // Découpage temporel pour validation out-of-sample (calibrer sur une
   // moitié, valider sur l'autre). Indices dans le tableau de bougies,
@@ -547,7 +560,7 @@ export async function GET(req: Request) {
 
     const events = triggers.map(t => resolveSqueezeTrade(
       bars, t, SQUEEZE_TTL_BARS, RR_UP, RR_DOWN,
-      LOOKBACK_BARS, VWAP_WINDOW, MAX_BARS_TO_RESOLVE
+      LOOKBACK_BARS, VWAP_WINDOW, MAX_BARS_TO_RESOLVE, CONFIRM_BARS
     ))
     const confirmed = events.filter(e => e.confirmed)
 
@@ -574,6 +587,7 @@ export async function GET(req: Request) {
         atrPeriod: ATR_PERIOD,
         vwapWindow: VWAP_WINDOW,
         maxBarsToResolve: MAX_BARS_TO_RESOLVE,
+        confirmBars: CONFIRM_BARS,
       },
       totalBars: bars.length,
       totalTriggers: triggers.length,
