@@ -117,6 +117,7 @@ type SqueezeBacktestResults = {
     undefined: DirectionBreakdown
   }
   events: SqueezeEvent[]
+  crossTfAlignmentMisses?: number
 }
 
 // ─── CALCULS ─────────────────────────────────────────────────────────────────
@@ -417,7 +418,7 @@ function resolveSqueezeTrade(
 function resolveSqueezeTradeCrossTf(
   signalBars: RawBar[],
   execBars: RawBar[],
-  execIndexByTime: Map<number, number>,
+  j0: number,
   trigger: Trigger,
   ttlExecBars: number,
   rrUp: number,
@@ -442,15 +443,6 @@ function resolveSqueezeTradeCrossTf(
     dominance: Math.round(trigger.dominance * 1000) / 1000,
     atrAtTrigger: trigger.atrAtTrigger,
     trend: trigger.trend,
-  }
-
-  // Alignement temporel : on cherche la bougie d'exécution dont le timestamp
-  // correspond exactement au début de la bougie signal qui a déclenché.
-  // Si l'historique d'exécution a un trou à ce moment précis, le trigger
-  // est ignoré (pas de confirmation) plutôt que de risquer un alignement faux.
-  const j0 = execIndexByTime.get(trigger.time)
-  if (j0 === undefined) {
-    return { ...base, confirmed: false, outcome: 'no_confirmation', rMultiple: 0 }
   }
 
   let consecutiveCount = 0
@@ -719,6 +711,8 @@ export async function GET(req: Request) {
       }
     }
 
+    let crossTfAlignmentMisses = 0
+
     const events = CROSS_TF_MODE && execFileToUse
       ? (() => {
           const execBars: RawBar[] = JSON.parse(fs.readFileSync(execFileToUse, 'utf-8'))
@@ -726,11 +720,35 @@ export async function GET(req: Request) {
           for (let k = 0; k < execBars.length; k++) {
             execIndexByTime.set(execBars[k].time, k)
           }
-          return triggers.map(t => resolveSqueezeTradeCrossTf(
-            bars, execBars, execIndexByTime, t,
-            TTL_EXEC, RR_UP, RR_DOWN,
-            LOOKBACK_BARS, VWAP_WINDOW_EXEC, MAX_BARS_TO_RESOLVE_EXEC, CONFIRM_BARS_EXEC
-          ))
+          // Durée réelle d'une bougie signal, déduite des données elles-mêmes
+          // (pas du libellé "1h"/"15m", pour rester robuste à tout timeframe).
+          // Le trigger n'est confirmé qu'à la CLÔTURE de sa bougie signal —
+          // donc on cherche la bougie d'exécution dont le temps correspond
+          // à cette clôture (ouverture + durée), pas à l'ouverture du trigger.
+          const signalBarDurationSec = bars.length > 1 ? bars[1].time - bars[0].time : 0
+          return triggers.map(t => {
+            const j0 = execIndexByTime.get(t.time + signalBarDurationSec)
+            if (j0 === undefined) {
+              crossTfAlignmentMisses++
+              return {
+                triggerTime: t.time,
+                direction: t.direction,
+                priceMovePct: Math.round(t.priceMovePct * 1000) / 1000,
+                oiChangePct: Math.round(t.oiChangePct * 1000) / 1000,
+                dominance: Math.round(t.dominance * 1000) / 1000,
+                atrAtTrigger: t.atrAtTrigger,
+                trend: t.trend,
+                confirmed: false,
+                outcome: 'no_confirmation' as const,
+                rMultiple: 0,
+              }
+            }
+            return resolveSqueezeTradeCrossTf(
+              bars, execBars, j0, t,
+              TTL_EXEC, RR_UP, RR_DOWN,
+              LOOKBACK_BARS, VWAP_WINDOW_EXEC, MAX_BARS_TO_RESOLVE_EXEC, CONFIRM_BARS_EXEC
+            )
+          })
         })()
       : triggers.map(t => resolveSqueezeTrade(
           bars, t, SQUEEZE_TTL_BARS, RR_UP, RR_DOWN,
@@ -782,6 +800,7 @@ export async function GET(req: Request) {
         undefined: calcDirectionBreakdown(events.filter(e => e.trend === 'undefined')),
       },
       events: events.slice(-300),
+      ...(CROSS_TF_MODE ? { crossTfAlignmentMisses } : {}),
     }
 
     const RESULTS_FILE = path.join(DATA_DIR, `squeeze-backtest-results-${symbol.toLowerCase()}-${tf}.json`)
