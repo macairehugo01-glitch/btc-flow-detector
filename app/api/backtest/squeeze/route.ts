@@ -35,6 +35,14 @@ const DEFAULT_VWAP_WINDOW = 50
 const SL_BUFFER_PCT = 0.002
 const DEFAULT_MAX_BARS_TO_RESOLVE = 16
 
+// ─── EXÉCUTION CROISÉE (signal sur tf, exécution sur execTf) ────────────────
+// Défauts pensés pour le cas explicite signal=1h / exécution=15m (×4).
+// Si execTf diffère de cette combinaison, ajuster ces valeurs via l'URL.
+const DEFAULT_CONFIRM_BARS_EXEC = 8
+const DEFAULT_TTL_EXEC = 32
+const DEFAULT_VWAP_WINDOW_EXEC = 200
+const DEFAULT_MAX_BARS_TO_RESOLVE_EXEC = 64
+
 // ─── TYPES ───────────────────────────────────────────────────────────────────
 
 type SqueezeDirection = 'up' | 'down'
@@ -91,6 +99,11 @@ type SqueezeBacktestResults = {
     vwapWindow: number
     maxBarsToResolve: number
     confirmBars: number
+    execTf: string | null
+    confirmBarsExec: number | null
+    ttlExec: number | null
+    vwapWindowExec: number | null
+    maxBarsToResolveExec: number | null
   }
   totalBars: number
   totalTriggers: number
@@ -394,6 +407,115 @@ function resolveSqueezeTrade(
   }
 }
 
+// ─── EXÉCUTION CROISÉE ────────────────────────────────────────────────────
+// Le signal (impulsion, OI, dominance, régime Dow) est détecté sur les
+// bougies "signal" (ex: 1h) — logique inchangée, paramètres déjà validés.
+// L'entrée (croisement VWAP) et la résolution SL/TP sont vérifiées sur les
+// bougies "exécution" (ex: 15m), plus précises. Le niveau de SL/TP est
+// calculé à partir de la fenêtre de lookback du signal (durée déjà validée),
+// seule la DÉTECTION du moment où ce niveau est touché change de résolution.
+function resolveSqueezeTradeCrossTf(
+  signalBars: RawBar[],
+  execBars: RawBar[],
+  execIndexByTime: Map<number, number>,
+  trigger: Trigger,
+  ttlExecBars: number,
+  rrUp: number,
+  rrDown: number,
+  lookbackBars: number,
+  vwapWindowExec: number,
+  maxBarsToResolveExec: number,
+  confirmBarsExec: number
+): SqueezeEvent {
+  const rr = trigger.direction === 'up' ? rrUp : rrDown
+  const i = trigger.triggerIdx
+  const windowStart = i - lookbackBars + 1
+  const windowBars = signalBars.slice(windowStart, i + 1)
+  const windowHigh = Math.max(...windowBars.map(b => b.high))
+  const windowLow = Math.min(...windowBars.map(b => b.low))
+
+  const base = {
+    triggerTime: trigger.time,
+    direction: trigger.direction,
+    priceMovePct: Math.round(trigger.priceMovePct * 1000) / 1000,
+    oiChangePct: Math.round(trigger.oiChangePct * 1000) / 1000,
+    dominance: Math.round(trigger.dominance * 1000) / 1000,
+    atrAtTrigger: trigger.atrAtTrigger,
+    trend: trigger.trend,
+  }
+
+  // Alignement temporel : on cherche la bougie d'exécution dont le timestamp
+  // correspond exactement au début de la bougie signal qui a déclenché.
+  // Si l'historique d'exécution a un trou à ce moment précis, le trigger
+  // est ignoré (pas de confirmation) plutôt que de risquer un alignement faux.
+  const j0 = execIndexByTime.get(trigger.time)
+  if (j0 === undefined) {
+    return { ...base, confirmed: false, outcome: 'no_confirmation', rMultiple: 0 }
+  }
+
+  let consecutiveCount = 0
+  let confirmBarIdx = -1
+
+  for (let j = j0; j < Math.min(j0 + ttlExecBars, execBars.length); j++) {
+    const vwapJ = computeVWAPAt(execBars, j, vwapWindowExec)
+    const closeJ = execBars[j].close
+    const onOppositeSide = trigger.direction === 'up' ? closeJ < vwapJ : closeJ > vwapJ
+
+    if (onOppositeSide) {
+      consecutiveCount++
+      if (consecutiveCount >= confirmBarsExec) {
+        confirmBarIdx = j
+        break
+      }
+    } else {
+      consecutiveCount = 0
+    }
+  }
+
+  if (confirmBarIdx === -1) {
+    return { ...base, confirmed: false, outcome: 'no_confirmation', rMultiple: 0 }
+  }
+
+  const action: 'BUY' | 'SELL' = trigger.direction === 'up' ? 'SELL' : 'BUY'
+  const entryPrice = execBars[confirmBarIdx].close
+
+  const slPrice = action === 'SELL'
+    ? windowHigh * (1 + SL_BUFFER_PCT)
+    : windowLow * (1 - SL_BUFFER_PCT)
+
+  const risk = Math.abs(entryPrice - slPrice)
+  const tpPrice = action === 'SELL' ? entryPrice - risk * rr : entryPrice + risk * rr
+
+  let outcome: SqueezeOutcome = 'breakeven'
+  let rMultiple = 0
+  let barsToClose = 0
+
+  for (let j = confirmBarIdx + 1; j < Math.min(confirmBarIdx + 1 + maxBarsToResolveExec, execBars.length); j++) {
+    const b = execBars[j]
+    barsToClose = j - confirmBarIdx
+    if (action === 'SELL') {
+      if (b.low <= tpPrice) { outcome = 'win'; rMultiple = rr; break }
+      if (b.high >= slPrice) { outcome = 'loss'; rMultiple = -1; break }
+    } else {
+      if (b.high >= tpPrice) { outcome = 'win'; rMultiple = rr; break }
+      if (b.low <= slPrice) { outcome = 'loss'; rMultiple = -1; break }
+    }
+  }
+
+  return {
+    ...base,
+    confirmed: true,
+    barsToConfirm: confirmBarIdx - j0,
+    action,
+    entryPrice,
+    slPrice,
+    tpPrice,
+    outcome,
+    rMultiple,
+    barsToClose,
+  }
+}
+
 function calcStats(events: SqueezeEvent[]): StatBlock {
   const closed = events.filter(e => e.outcome === 'win' || e.outcome === 'loss')
   const wins = closed.filter(e => e.outcome === 'win')
@@ -504,6 +626,33 @@ export async function GET(req: Request) {
     ? Number(confirmBarsRaw)
     : DEFAULT_CONFIRM_BARS
 
+  // Exécution croisée : signal détecté sur `tf`, entrée/résolution sur
+  // `execTf` (ex: tf=1h, execTf=15m). Si execTf absent ou égal à tf,
+  // comportement classique mono-timeframe inchangé.
+  const execTfRaw = url.searchParams.get('execTf')
+  const EXEC_TF = (execTfRaw !== null && execTfRaw !== '') ? execTfRaw : null
+  const CROSS_TF_MODE = EXEC_TF !== null && EXEC_TF !== tf
+
+  const confirmBarsExecRaw = url.searchParams.get('confirmBarsExec')
+  const CONFIRM_BARS_EXEC = (confirmBarsExecRaw !== null && Number(confirmBarsExecRaw) > 0)
+    ? Number(confirmBarsExecRaw)
+    : DEFAULT_CONFIRM_BARS_EXEC
+
+  const ttlExecRaw = url.searchParams.get('ttlExec')
+  const TTL_EXEC = (ttlExecRaw !== null && Number(ttlExecRaw) > 0)
+    ? Number(ttlExecRaw)
+    : DEFAULT_TTL_EXEC
+
+  const vwapWindowExecRaw = url.searchParams.get('vwapWindowExec')
+  const VWAP_WINDOW_EXEC = (vwapWindowExecRaw !== null && Number(vwapWindowExecRaw) > 0)
+    ? Number(vwapWindowExecRaw)
+    : DEFAULT_VWAP_WINDOW_EXEC
+
+  const maxBarsToResolveExecRaw = url.searchParams.get('maxBarsToResolveExec')
+  const MAX_BARS_TO_RESOLVE_EXEC = (maxBarsToResolveExecRaw !== null && Number(maxBarsToResolveExecRaw) > 0)
+    ? Number(maxBarsToResolveExecRaw)
+    : DEFAULT_MAX_BARS_TO_RESOLVE_EXEC
+
   // Découpage temporel pour validation out-of-sample (calibrer sur une
   // moitié, valider sur l'autre). Indices dans le tableau de bougies,
   // comme un slice JS classique : [barStart, barEnd).
@@ -529,6 +678,18 @@ export async function GET(req: Request) {
       { error: `Données ${symbol} ${tf} manquantes. Lance /api/backtest/collect?symbol=${symbol}&tf=${tf} d'abord.` },
       { status: 400 }
     )
+  }
+
+  let execFileToUse: string | null = null
+  if (CROSS_TF_MODE && EXEC_TF) {
+    const EXEC_HISTORY_FILE = path.join(DATA_DIR, `backtest-history-${symbol.toLowerCase()}-${EXEC_TF}.json`)
+    if (!fs.existsSync(EXEC_HISTORY_FILE)) {
+      return NextResponse.json(
+        { error: `Données d'exécution ${symbol} ${EXEC_TF} manquantes. Lance /api/backtest/collect?symbol=${symbol}&tf=${EXEC_TF} d'abord.` },
+        { status: 400 }
+      )
+    }
+    execFileToUse = EXEC_HISTORY_FILE
   }
 
   try {
@@ -558,10 +719,23 @@ export async function GET(req: Request) {
       }
     }
 
-    const events = triggers.map(t => resolveSqueezeTrade(
-      bars, t, SQUEEZE_TTL_BARS, RR_UP, RR_DOWN,
-      LOOKBACK_BARS, VWAP_WINDOW, MAX_BARS_TO_RESOLVE, CONFIRM_BARS
-    ))
+    const events = CROSS_TF_MODE && execFileToUse
+      ? (() => {
+          const execBars: RawBar[] = JSON.parse(fs.readFileSync(execFileToUse, 'utf-8'))
+          const execIndexByTime = new Map<number, number>()
+          for (let k = 0; k < execBars.length; k++) {
+            execIndexByTime.set(execBars[k].time, k)
+          }
+          return triggers.map(t => resolveSqueezeTradeCrossTf(
+            bars, execBars, execIndexByTime, t,
+            TTL_EXEC, RR_UP, RR_DOWN,
+            LOOKBACK_BARS, VWAP_WINDOW_EXEC, MAX_BARS_TO_RESOLVE_EXEC, CONFIRM_BARS_EXEC
+          ))
+        })()
+      : triggers.map(t => resolveSqueezeTrade(
+          bars, t, SQUEEZE_TTL_BARS, RR_UP, RR_DOWN,
+          LOOKBACK_BARS, VWAP_WINDOW, MAX_BARS_TO_RESOLVE, CONFIRM_BARS
+        ))
     const confirmed = events.filter(e => e.confirmed)
 
     const results: SqueezeBacktestResults = {
@@ -588,6 +762,11 @@ export async function GET(req: Request) {
         vwapWindow: VWAP_WINDOW,
         maxBarsToResolve: MAX_BARS_TO_RESOLVE,
         confirmBars: CONFIRM_BARS,
+        execTf: CROSS_TF_MODE ? EXEC_TF : null,
+        confirmBarsExec: CROSS_TF_MODE ? CONFIRM_BARS_EXEC : null,
+        ttlExec: CROSS_TF_MODE ? TTL_EXEC : null,
+        vwapWindowExec: CROSS_TF_MODE ? VWAP_WINDOW_EXEC : null,
+        maxBarsToResolveExec: CROSS_TF_MODE ? MAX_BARS_TO_RESOLVE_EXEC : null,
       },
       totalBars: bars.length,
       totalTriggers: triggers.length,
