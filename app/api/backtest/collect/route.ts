@@ -27,6 +27,7 @@ const TF_CONFIG: Record<string, { interval: string; oiInterval: string; targetBa
   '1h':  { interval: '60',  oiInterval: '1h',    targetBars: 17520, label: '1h'  },
   '15m': { interval: '15',  oiInterval: '15min', targetBars: 70080, label: '15m' },
   '4h':  { interval: '240', oiInterval: '4h',    targetBars: 4380,  label: '4h'  },
+  '1d':  { interval: 'D',   oiInterval: '1d',    targetBars: 1095,  label: '1d'  },
 }
 
 function getHistoryFile(symbol: string, tf: string): string {
@@ -158,14 +159,14 @@ export async function GET(req: Request) {
   const tf = url.searchParams.get('tf') ?? '1h'
 
   // Validation
-  const allowedSymbols = ['BTCUSDT', 'ETHUSDT']
+  const allowedSymbols = ['BTCUSDT', 'ETHUSDT', 'XRPUSDT', 'SOLUSDT']
   if (!allowedSymbols.includes(symbol)) {
     return NextResponse.json({ error: `Symbole non supporté: ${symbol}` }, { status: 400 })
   }
 
   const config = TF_CONFIG[tf]
   if (!config) {
-    return NextResponse.json({ error: `Timeframe non supporté: ${tf}. Utilise 1h, 15m ou 4h` }, { status: 400 })
+    return NextResponse.json({ error: `Timeframe non supporté: ${tf}. Utilise 1h, 15m, 4h ou 1d` }, { status: 400 })
   }
 
   const HISTORY_FILE = getHistoryFile(symbol, tf)
