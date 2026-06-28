@@ -66,7 +66,7 @@ export default function TradeSignalPanel() {
           }}
         >
           <div>Price vs VWAP: {metrics.priceVsVwapPct.toFixed(2)}%</div>
-          <div>CVD Δ: {metrics.cvdDelta.toFixed(2)}</div>
+          <div>Dominance: {metrics.cvdDelta.toFixed(3)}</div>
           <div>OI Δ abs: {metrics.oiChangeAbs.toFixed(2)}</div>
           <div>OI Δ %: {metrics.oiDeltaPct.toFixed(4)}%</div>
           <div>Funding: {(metrics.fundingRate * 100).toFixed(4)}%</div>
