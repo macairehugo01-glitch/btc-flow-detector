@@ -69,7 +69,8 @@ export function saveOIBuffer(buffer: OIBar[], slot?: string) {
   } catch {}
 }
 
-// ─── SWEEP STATE — un fichier par slot ───────────────────────────────────────
+// ─── SWEEP STATE — un fichier par slot (ancienne stratégie LFR, conservé
+// pour compatibilité mais plus utilisé par le moteur actuel) ────────────────
 
 export type SweepState = {
   direction: 'high' | 'low'
@@ -81,7 +82,6 @@ export type SweepState = {
   cvdAtSweep: number
 } | null
 
-// TTL 2h — validé par backtest (fresh 0-2 bougies = 100% WR sur BTC 1h)
 const SWEEP_TTL_MS = 2 * 60 * 60 * 1000
 
 function getSweepFilePath(slot?: string): string {
@@ -116,5 +116,88 @@ export function saveSweepState(state: SweepState, slot?: string) {
       return
     }
     fs.writeFileSync(filePath, JSON.stringify(state, null, 2), 'utf-8')
+  } catch {}
+}
+
+// ─── ÉTAT DU DÉTECTEUR SQUEEZE (stratégie validée UP→SELL/DOWN→BUY + régime
+// Dow daily) — un fichier par slot.
+
+export type PendingSqueezeTrigger = {
+  triggerTime: number
+  windowHigh: number
+  windowLow: number
+  consecutiveCount: number
+  barsWaited: number
+} | null
+
+export type SqueezeDetectorState = {
+  lastBarTimeProcessed: number
+  // 0 = "jamais déclenché" — surtout PAS -Infinity, qui n'est pas JSON-safe
+  // et redeviendrait `null` après un cycle save/load, cassant le calcul du
+  // cooldown au redémarrage du service.
+  lastTriggerTime: number
+  pendingTrigger: PendingSqueezeTrigger
+}
+
+const DEFAULT_SQUEEZE_STATE: SqueezeDetectorState = {
+  lastBarTimeProcessed: 0,
+  lastTriggerTime: 0,
+  pendingTrigger: null,
+}
+
+function getSqueezeStateFilePath(slot: string): string {
+  return path.join(DATA_DIR, `squeeze-state-${slot.toLowerCase().replace('-', '_')}.json`)
+}
+
+export function loadSqueezeState(slot: string): SqueezeDetectorState {
+  try {
+    ensureDir()
+    const filePath = getSqueezeStateFilePath(slot)
+    if (!fs.existsSync(filePath)) return { ...DEFAULT_SQUEEZE_STATE }
+    const raw = fs.readFileSync(filePath, 'utf-8')
+    return { ...DEFAULT_SQUEEZE_STATE, ...JSON.parse(raw) }
+  } catch {
+    return { ...DEFAULT_SQUEEZE_STATE }
+  }
+}
+
+export function saveSqueezeState(state: SqueezeDetectorState, slot: string) {
+  try {
+    ensureDir()
+    fs.writeFileSync(getSqueezeStateFilePath(slot), JSON.stringify(state, null, 2), 'utf-8')
+  } catch {}
+}
+
+// ─── CACHE DU RÉGIME DOW DAILY — un fichier par symbole (BTC/ETH/SOL/XRP) ───
+// Le régime ne change que lorsqu'un nouveau swing est confirmé (rare, au
+// mieux quelques fois par mois) — inutile de le recalculer à chaque poll
+// de 10s. Rafraîchi au maximum une fois par heure (voir REGIME_REFRESH_MS
+// dans cvd/route.ts).
+
+export type DailyRegimeCache = {
+  fetchedAt: number
+  dailyBars: { time: number; high: number; low: number }[]
+  trendLabels: ('up' | 'down' | 'undefined')[]
+}
+
+function getRegimeCacheFilePath(symbol: string): string {
+  return path.join(DATA_DIR, `daily-regime-${symbol.toLowerCase()}.json`)
+}
+
+export function loadDailyRegimeCache(symbol: string): DailyRegimeCache | null {
+  try {
+    ensureDir()
+    const filePath = getRegimeCacheFilePath(symbol)
+    if (!fs.existsSync(filePath)) return null
+    return JSON.parse(fs.readFileSync(filePath, 'utf-8'))
+  } catch {
+    return null
+  }
+}
+
+export function saveDailyRegimeCache(cache: DailyRegimeCache, symbol: string) {
+  try {
+    ensureDir()
+    fs.writeFileSync(getRegimeCacheFilePath(symbol), JSON.stringify(cache), 'utf-8')
   } catch {}
 }
