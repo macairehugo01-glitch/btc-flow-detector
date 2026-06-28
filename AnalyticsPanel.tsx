@@ -2,13 +2,19 @@
 
 import { useMarketStore } from './useMarketStore'
 
-type SlotKey = 'BTC-1h' | 'BTC-15m' | 'ETH-1h' | 'ETH-15m'
+type SlotKey = 'BTC-1h' | 'ETH-1h' | 'SOL-1h' | 'XRP-1h'
 
 const SLOT_COLOR: Record<SlotKey, string> = {
-  'BTC-1h':  '#f7931a',
-  'ETH-1h':  '#627eea',
-  'BTC-15m': '#f7931a',
-  'ETH-15m': '#627eea',
+  'BTC-1h': '#f7931a',
+  'ETH-1h': '#627eea',
+  'SOL-1h': '#14f195',
+  'XRP-1h': '#0085c3',
+}
+
+function colorRegime(regime: string) {
+  if (regime === 'up') return 'var(--accent-green)'
+  if (regime === 'down') return 'var(--accent-red)'
+  return 'var(--text-muted)'
 }
 
 function colorWR(wr: number) {
@@ -24,9 +30,9 @@ function colorAction(action: string) {
 }
 
 export default function AnalyticsPanel() {
-  const { slotSignals, allPositions, slotStats, activeSweeps, setupStats, sessionStats } = useMarketStore()
+  const { slotSignals, allPositions, slotStats, setupStats, sessionStats } = useMarketStore()
 
-  const slots: SlotKey[] = ['BTC-1h', 'ETH-1h', 'BTC-15m', 'ETH-15m']
+  const slots: SlotKey[] = ['BTC-1h', 'ETH-1h', 'SOL-1h', 'XRP-1h']
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -34,7 +40,7 @@ export default function AnalyticsPanel() {
       {/* 4 Slots */}
       <div style={{ background: 'var(--bg-card)', border: '1px solid var(--bg-border)', borderRadius: 12, padding: 16 }}>
         <div style={{ fontSize: 11, fontFamily: 'monospace', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 16 }}>
-          Slots LFR — BTC · ETH · 1h · 15m
+          Squeeze H1 + Régime Daily — BTC · ETH · SOL · XRP
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
@@ -42,9 +48,7 @@ export default function AnalyticsPanel() {
             const signal = slotSignals?.[slot]
             const position = allPositions?.[slot]
             const stats = slotStats?.[slot]
-            const sweep = activeSweeps?.[slot]
             const color = SLOT_COLOR[slot]
-            const tf = slot.includes('1h') ? '1H' : '15M'
 
             return (
               <div key={slot} style={{ background: 'var(--bg-primary)', border: `1px solid ${color}44`, borderRadius: 10, padding: 12 }}>
@@ -52,7 +56,9 @@ export default function AnalyticsPanel() {
                 {/* Header */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                   <div style={{ fontFamily: 'monospace', fontWeight: 800, fontSize: 13, color }}>{slot.replace('-', ' ')}</div>
-                  <div style={{ fontSize: 10, background: `${color}22`, color, padding: '2px 6px', borderRadius: 4, fontFamily: 'monospace' }}>{tf}</div>
+                  <div style={{ fontSize: 10, background: `${colorRegime(signal?.dailyRegime ?? 'undefined')}22`, color: colorRegime(signal?.dailyRegime ?? 'undefined'), padding: '2px 6px', borderRadius: 4, fontFamily: 'monospace' }}>
+                    régime {signal?.dailyRegime ?? '—'}
+                  </div>
                 </div>
 
                 {/* Signal */}
@@ -60,17 +66,18 @@ export default function AnalyticsPanel() {
                   <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 3 }}>SIGNAL</div>
                   <div style={{ fontSize: 15, fontWeight: 800, color: colorAction(signal?.action ?? 'STABLE') }}>
                     {signal?.action ?? '—'}
-                    {signal?.score ? <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-muted)', marginLeft: 4 }}>{signal.score}/5</span> : null}
                   </div>
                 </div>
 
-                {/* Sweep actif */}
-                {sweep && (
+                {/* Trigger en attente de confirmation VWAP */}
+                {signal?.pendingTrigger && (
                   <div style={{ marginBottom: 8, padding: '4px 8px', background: 'rgba(255,211,75,0.08)', borderRadius: 6, border: '1px solid rgba(255,211,75,0.2)' }}>
                     <div style={{ fontSize: 10, color: 'var(--accent-yellow)', fontFamily: 'monospace' }}>
-                      SWEEP {sweep.direction.toUpperCase()} — {sweep.ageMinutes}min
+                      TRIGGER EN ATTENTE — {signal.pendingTrigger.barsWaited}h / 8h
                     </div>
-                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{sweep.structureLevel?.toFixed(0)}</div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                      Confirmation VWAP : {signal.pendingTrigger.consecutiveCount}/2
+                    </div>
                   </div>
                 )}
 
@@ -156,7 +163,7 @@ export default function AnalyticsPanel() {
         <a href="/api/analytics/export" style={{ flex: 1, textAlign: 'center', padding: '10px', borderRadius: 8, border: '1px solid var(--bg-border)', background: 'var(--bg-primary)', color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: 12, textDecoration: 'none' }}>
           📥 Export CSV trades
         </a>
-        <a href="/api/signal/log" style={{ flex: 1, textAlign: 'center', padding: '10px', borderRadius: 8, border: '1px solid rgba(0,212,168,0.3)', background: 'rgba(0,212,168,0.06)', color: 'var(--accent-green)', fontFamily: 'monospace', fontSize: 12, textDecoration: 'none' }}>
+        <a href="/api/signal" style={{ flex: 1, textAlign: 'center', padding: '10px', borderRadius: 8, border: '1px solid rgba(0,212,168,0.3)', background: 'rgba(0,212,168,0.06)', color: 'var(--accent-green)', fontFamily: 'monospace', fontSize: 12, textDecoration: 'none' }}>
           📋 Export log signaux
         </a>
       </div>
