@@ -3,7 +3,7 @@
 import { create } from 'zustand'
 
 export type Timeframe = '1m' | '5m' | '15m' | '1h'
-export type SlotKey = 'BTC-1h' | 'BTC-15m' | 'ETH-1h' | 'ETH-15m'
+export type SlotKey = 'BTC-1h' | 'ETH-1h' | 'SOL-1h' | 'XRP-1h'
 
 export type KlineBar = {
   time: number
@@ -105,18 +105,18 @@ export type TradeSignal = {
   }
 }
 
-// ─── NOUVEAUX TYPES 4 SLOTS ───────────────────────────────────────────────────
+// ─── TYPES SLOTS (stratégie squeeze H1 + régime Dow daily) ──────────────────
 
 export type SlotSignal = {
   action: 'BUY' | 'SELL' | 'STABLE'
-  score: number
   reasons: string[]
   vwap: number
-  sweepAge?: number
+  dailyRegime: 'up' | 'down' | 'undefined'
+  pendingTrigger: { triggerTime: number; barsWaited: number; consecutiveCount: number } | null
   metrics: {
     priceVsVwapPct: number
-    cvdDelta: number
-    distanceFromVwapPct: number
+    oiChangePct: number
+    dominance: number
     fundingRate: number
   }
 }
@@ -134,12 +134,6 @@ export type LivePosition = {
   referenceBarKey: string
 } | null
 
-export type ActiveSweep = {
-  direction: 'high' | 'low'
-  ageMinutes: number
-  structureLevel: number
-} | null
-
 // ─── STORE ───────────────────────────────────────────────────────────────────
 
 type MarketDataPayload = {
@@ -154,11 +148,10 @@ type MarketDataPayload = {
   funding?: { rate: number; nextFundingTime: number } | null
   signal?: TradeSignal | null
   lastUpdate?: number | null
-  // Nouveaux champs 4 slots
+  // Champs slots (stratégie squeeze H1 + régime daily)
   slotSignals?: Record<SlotKey, SlotSignal>
   allPositions?: Record<SlotKey, LivePosition>
   slotStats?: Record<SlotKey, SetupStats>
-  activeSweeps?: Record<SlotKey, ActiveSweep>
 }
 
 type MarketStore = {
@@ -178,11 +171,10 @@ type MarketStore = {
   isLoading: boolean
   error: string | null
   thresholds: Thresholds
-  // Nouveaux champs 4 slots
+  // Champs slots (stratégie squeeze H1 + régime daily)
   slotSignals: Record<SlotKey, SlotSignal> | null
   allPositions: Record<SlotKey, LivePosition> | null
   slotStats: Record<SlotKey, SetupStats> | null
-  activeSweeps: Record<SlotKey, ActiveSweep> | null
 
   setTimeframe: (tf: Timeframe) => void
   setThresholds: (t: Partial<Thresholds>) => void
@@ -209,11 +201,10 @@ export const useMarketStore = create<MarketStore>((set) => ({
   isLoading: true,
   error: null,
   thresholds: { mode: 'aggressive' },
-  // Nouveaux champs 4 slots
+  // Champs slots (stratégie squeeze H1 + régime daily)
   slotSignals: null,
   allPositions: null,
   slotStats: null,
-  activeSweeps: null,
 
   setTimeframe: (timeframe) => set({ timeframe }),
   setThresholds: (t) => set((state) => ({ thresholds: { ...state.thresholds, ...t } })),
@@ -227,7 +218,6 @@ export const useMarketStore = create<MarketStore>((set) => ({
       slotSignals: data.slotSignals ?? state.slotSignals,
       allPositions: data.allPositions ?? state.allPositions,
       slotStats: data.slotStats ?? state.slotStats,
-      activeSweeps: data.activeSweeps ?? state.activeSweeps,
     })),
   setError: (error) => set({ error }),
   setLoading: (isLoading) => set({ isLoading }),
