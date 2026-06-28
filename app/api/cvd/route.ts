@@ -17,39 +17,67 @@ import {
   getSessionStats,
   getCurrentPosition,
   getAllPositions,
-  hasRecentDuplicate,
-  isInCooldown,
   openPosition,
-  closePosition,
   type SlotKey,
 } from '../../../store'
 import {
   loadOIBuffer,
   saveOIBuffer,
-  loadSweepState,
-  saveSweepState,
-  type SweepState,
+  loadSqueezeState,
+  saveSqueezeState,
+  loadDailyRegimeCache,
+  saveDailyRegimeCache,
+  type SqueezeDetectorState,
 } from '../../../journalPersistence'
 
 export const dynamic = 'force-dynamic'
 
-// ─── CONFIG DES 4 SLOTS ───────────────────────────────────────────────────────
+// ─── CONFIG DES 4 SLOTS ──────────────────────────────────────────────────────
+// BTC/ETH/SOL : UP→SELL filtré par régime Dow daily (edge principal,
+// rigoureusement validé sur l'ensemble de la session de backtest).
+// XRP : DOWN→BUY, SANS filtre de régime — son comportement s'est avéré
+// inversé par rapport aux 3 autres actifs (UP→SELL y était perdant), et
+// DOWN→BUY y était positif dans les DEUX régimes daily, donc le régime n'y
+// joue pas le même rôle discriminant. Cet edge XRP est moins rigoureusement
+// validé (découvert en cours d'analyse, pas optimisé indépendamment) — à
+// surveiller plus attentivement que les 3 autres une fois en production.
 
 type SlotConfig = {
   slot: SlotKey
   symbol: string
-  timeframe: '1h' | '15m'
-  bybitInterval: string
-  oiInterval: string
-  vwapDistanceMax: number  // 0.3% validé par backtest
+  direction: 'up' | 'down'
+  regimeFiltered: boolean
 }
 
 const SLOT_CONFIGS: SlotConfig[] = [
-  { slot: 'BTC-1h',  symbol: 'BTCUSDT', timeframe: '1h',  bybitInterval: '60', oiInterval: '1h',    vwapDistanceMax: 0.3 },
-  { slot: 'ETH-1h',  symbol: 'ETHUSDT', timeframe: '1h',  bybitInterval: '60', oiInterval: '1h',    vwapDistanceMax: 0.3 },
-  { slot: 'BTC-15m', symbol: 'BTCUSDT', timeframe: '15m', bybitInterval: '15', oiInterval: '15min', vwapDistanceMax: 0.5 },
-  { slot: 'ETH-15m', symbol: 'ETHUSDT', timeframe: '15m', bybitInterval: '15', oiInterval: '15min', vwapDistanceMax: 0.5 },
+  { slot: 'BTC-1h', symbol: 'BTCUSDT', direction: 'up',   regimeFiltered: true },
+  { slot: 'ETH-1h', symbol: 'ETHUSDT', direction: 'up',   regimeFiltered: true },
+  { slot: 'SOL-1h', symbol: 'SOLUSDT', direction: 'up',   regimeFiltered: true },
+  { slot: 'XRP-1h', symbol: 'XRPUSDT', direction: 'down', regimeFiltered: false },
 ]
+
+const ALL_SLOTS: SlotKey[] = SLOT_CONFIGS.map(c => c.slot)
+
+// ─── PARAMÈTRES VERROUILLÉS DE LA STRATÉGIE (validés sur l'ensemble de la
+// session de backtest BTC/ETH/SOL) ───────────────────────────────────────────
+
+const COOLDOWN_HOURS = 12
+const TTL_BARS = 8
+const RR_UP = 1.5
+const RR_DOWN = 1.5
+const DOM_UP = 0.5
+const DOM_DOWN = 0.5
+const ATR_MULT_UP = 0.8
+const ATR_MULT_DOWN = 0.5
+const OI_DROP_PCT = 1.0
+const LOOKBACK_BARS = 5
+const ATR_PERIOD = 14
+const VWAP_WINDOW = 50
+const CONFIRM_BARS = 2
+const SL_BUFFER_PCT = 0.002
+const SWING_LOOKBACK_DAILY = 20
+const DAILY_FETCH_LIMIT = 200
+const REGIME_REFRESH_MS = 60 * 60 * 1000 // le régime change rarement — pas besoin de refetch à chaque poll 10s
 
 // ─── OI BUFFERS (un par slot) ─────────────────────────────────────────────────
 
@@ -57,38 +85,16 @@ type OIBar = { time: number; openInterest: number }
 
 const MAX_OI_POINTS = 500
 const oiBuffers: Record<SlotKey, OIBar[]> = {
-  'BTC-1h':  loadOIBuffer('BTC-1h'),
-  'ETH-1h':  loadOIBuffer('ETH-1h'),
-  'BTC-15m': loadOIBuffer('BTC-15m'),
-  'ETH-15m': loadOIBuffer('ETH-15m'),
+  'BTC-1h': loadOIBuffer('BTC-1h'),
+  'ETH-1h': loadOIBuffer('ETH-1h'),
+  'SOL-1h': loadOIBuffer('SOL-1h'),
+  'XRP-1h': loadOIBuffer('XRP-1h'),
 }
 const oiHistoryLoaded: Record<SlotKey, boolean> = {
-  'BTC-1h': false, 'ETH-1h': false, 'BTC-15m': false, 'ETH-15m': false,
+  'BTC-1h': false, 'ETH-1h': false, 'SOL-1h': false, 'XRP-1h': false,
 }
 
-// ─── SWEEP STATES (un par slot) ───────────────────────────────────────────────
-
-const sweepStates: Record<SlotKey, SweepState> = {
-  'BTC-1h':  loadSweepState('BTC-1h'),
-  'ETH-1h':  loadSweepState('ETH-1h'),
-  'BTC-15m': loadSweepState('BTC-15m'),
-  'ETH-15m': loadSweepState('ETH-15m'),
-}
-
-const SWEEP_TTL_MS = 2 * 60 * 60 * 1000 // 2h — validé par backtest (fresh = 0-2 bougies 1h)
-
-function isSweepValid(slot: SlotKey): boolean {
-  const sweep = sweepStates[slot]
-  if (!sweep) return false
-  if (Date.now() - sweep.detectedAt > SWEEP_TTL_MS) {
-    sweepStates[slot] = null
-    saveSweepState(null, slot)
-    return false
-  }
-  return true
-}
-
-// ─── HELPERS ─────────────────────────────────────────────────────────────────
+// ─── HELPERS GÉNÉRIQUES (conservés depuis l'ancienne version) ──────────────
 
 function isWeekend(): boolean {
   const day = new Date().getUTCDay()
@@ -123,12 +129,6 @@ function getMarketRegime(klines: Array<{ high: number; low: number; close: numbe
   return 'range'
 }
 
-function getAvgVolume(klines: Array<{ volume: number }>, idx: number): number {
-  const lookback = klines.slice(Math.max(0, idx - 20), idx)
-  if (lookback.length < 5) return 0
-  return lookback.reduce((s, k) => s + k.volume, 0) / lookback.length
-}
-
 function pushOiSnapshot(slot: SlotKey, snapshot: OIBar) {
   const buf = oiBuffers[slot]
   const last = buf.at(-1)
@@ -152,11 +152,16 @@ function buildOiSeriesForKlines(slot: SlotKey, klines: Array<{ time: number }>):
   })
 }
 
-async function initOIBuffer(slot: SlotKey, oiInterval: string) {
+// Correctif : la version précédente appelait fetchOIHistory(oiInterval, 200)
+// SANS jamais passer le symbole → il retombait toujours sur BTCUSDT par
+// défaut, donc le buffer OI d'ETH (et maintenant SOL/XRP) se serait rempli
+// au démarrage avec l'historique OI de BTC. Corrigé ici en passant le bon
+// symbole explicitement.
+async function initOIBuffer(slot: SlotKey, symbol: string, oiInterval: string) {
   if (oiHistoryLoaded[slot] && oiBuffers[slot].length >= 10) return
   oiHistoryLoaded[slot] = true
   try {
-    const history = await fetchOIHistory(oiInterval, 200)
+    const history = await fetchOIHistory(oiInterval, 200, symbol)
     if (history.length > 1) {
       const existing = new Set(oiBuffers[slot].map(p => p.time))
       for (const point of history) {
@@ -172,272 +177,177 @@ async function initOIBuffer(slot: SlotKey, oiInterval: string) {
   }
 }
 
-// ─── DETECTION SWEEP ─────────────────────────────────────────────────────────
+// ─── MATHS DE LA STRATÉGIE SQUEEZE (mêmes formules que le moteur de
+// backtest squeeze/route.ts du repo de backtest — dupliquées ici pour
+// rester autonome ; si un seuil change là-bas, le refléter ici aussi) ──────
 
-function detectAndUpdateSweep(
-  slot: SlotKey,
-  klines: Array<{ time: number; high: number; low: number; close: number; open: number; volume: number }>,
-  oi: OIBar[],
-  cvd: Array<{ cvd: number }>
-): void {
-  const allClosed = klines.slice(0, -1)
-  if (allClosed.length < 10) return
-
-  for (let i = allClosed.length - 1; i >= 5; i--) {
-    const candle = allClosed[i]
-    const structureKlines = allClosed.slice(Math.max(0, i - 80), i)
-    if (structureKlines.length < 5) continue
-
-    const structureHigh = Math.max(...structureKlines.map(k => k.high))
-    const structureLow = Math.min(...structureKlines.map(k => k.low))
-
-    const avgVol = getAvgVolume(klines, i)
-    const volMult = avgVol > 0 ? klines[i].volume / avgVol : 1
-    if (volMult < 1.5) continue
-
-    const wickThreshold = volMult >= 3 ? 0.3 : 0.6
-    const totalSize = candle.high - candle.low
-    if (totalSize === 0) continue
-
-    if (Date.now() - candle.time * 1000 > SWEEP_TTL_MS) continue
-
-    // Sweep HIGH
-    const isHighSweep = candle.high > structureHigh && candle.close < structureHigh
-    const upperWick = candle.high - Math.max(candle.open, candle.close)
-    if (isHighSweep && upperWick / totalSize > wickThreshold) {
-      if (!sweepStates[slot] || candle.time * 1000 > sweepStates[slot]!.detectedAt) {
-        const oiAtSweep = oi.find(o => o.time <= candle.time)?.openInterest ?? 0
-        const cvdAtSweep = cvd[Math.min(i, cvd.length - 1)]?.cvd ?? 0
-        sweepStates[slot] = {
-          direction: 'high', detectedAt: candle.time * 1000,
-          structureLevel: structureHigh,
-          sweepHigh: candle.high, sweepLow: candle.low,
-          oiAtSweep, cvdAtSweep,
-        }
-        saveSweepState(sweepStates[slot], slot)
-        console.log(`[SWEEP] ${slot} HIGH @ ${new Date(sweepStates[slot]!.detectedAt).toISOString()}`)
-      }
-      break
-    }
-
-    // Sweep LOW
-    const isLowSweep = candle.low < structureLow && candle.close > structureLow
-    const lowerWick = Math.min(candle.open, candle.close) - candle.low
-    if (isLowSweep && lowerWick / totalSize > wickThreshold) {
-      if (!sweepStates[slot] || candle.time * 1000 > sweepStates[slot]!.detectedAt) {
-        const oiAtSweep = oi.find(o => o.time <= candle.time)?.openInterest ?? 0
-        const cvdAtSweep = cvd[Math.min(i, cvd.length - 1)]?.cvd ?? 0
-        sweepStates[slot] = {
-          direction: 'low', detectedAt: candle.time * 1000,
-          structureLevel: structureLow,
-          sweepHigh: candle.high, sweepLow: candle.low,
-          oiAtSweep, cvdAtSweep,
-        }
-        saveSweepState(sweepStates[slot], slot)
-        console.log(`[SWEEP] ${slot} LOW @ ${new Date(sweepStates[slot]!.detectedAt).toISOString()}`)
-      }
-      break
-    }
-  }
+type MergedBar = {
+  time: number
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+  oi: number
 }
 
-// ─── SCORING LFR (calibré sur backtest) ──────────────────────────────────────
+type DailyBar = { time: number; high: number; low: number }
+type TrendRegime = 'up' | 'down' | 'undefined'
 
-type SignalResult = {
-  action: 'BUY' | 'SELL' | 'STABLE'
-  score: number
-  reasons: string[]
-  vwap: number
-  sweepAge?: number
-  metrics: {
-    priceVsVwapPct: number
-    cvdDelta: number
-    distanceFromVwapPct: number
-    wickDistancePct: number  // distance mèche → VWAP
-    fundingRate: number
-  }
-  marketRegime: string
-  volatilityBucket: string
+function trueRange(curr: MergedBar, prev: MergedBar | undefined): number {
+  if (!prev) return curr.high - curr.low
+  return Math.max(curr.high - curr.low, Math.abs(curr.high - prev.close), Math.abs(curr.low - prev.close))
 }
 
-function computeSignal(
-  slot: SlotKey,
-  klines: Array<{ open: number; high: number; low: number; close: number; volume: number }>,
-  vwap: Array<{ vwap: number }>,
-  cvd: Array<{ delta: number; cvd: number }>,
-  funding: { rate: number } | null
-): SignalResult {
-  const lastK = klines.at(-1)
-  const lastV = vwap.at(-1)
-  const lastCvd = cvd.at(-1)
-  const prevCvd = cvd.at(-2)
-
-  const marketRegime = getMarketRegime(klines)
-  const volatilityBucket = getVolatilityBucket(klines)
-  const fundingRate = funding?.rate ?? 0
-  const currentVwap = lastV?.vwap ?? 0
-
-  const stable: SignalResult = {
-    action: 'STABLE', score: 0, reasons: ['Données insuffisantes.'],
-    vwap: currentVwap, metrics: { priceVsVwapPct: 0, cvdDelta: 0, distanceFromVwapPct: 0, wickDistancePct: 0, fundingRate },
-    marketRegime, volatilityBucket,
+function computeATR(bars: MergedBar[], period: number): number[] {
+  const atr = new Array(bars.length).fill(0)
+  let sum = 0
+  for (let i = 0; i < bars.length; i++) {
+    const tr = trueRange(bars[i], bars[i - 1])
+    if (i < period) { sum += tr; atr[i] = sum / (i + 1) }
+    else { atr[i] = (atr[i - 1] * (period - 1) + tr) / period }
   }
-
-  if (!lastK || !lastV || !lastCvd || !prevCvd) return stable
-
-  const sweep = sweepStates[slot]
-  if (!isSweepValid(slot) || !sweep) {
-    return {
-      ...stable,
-      reasons: ['Aucun sweep valide (< 2h).'],
-    }
-  }
-
-  const priceVsVwapPct = ((lastK.close - lastV.vwap) / lastV.vwap) * 100
-
-  // Distance VWAP sur le point de contact intrabar (mèche) pas seulement le close
-  // Si la mèche touche la VWAP, la distance est nulle même si le close est plus loin
-  const contactPriceSell = lastK.low   // pour SELL : le low s'approche de la VWAP
-  const contactPriceBuy  = lastK.high  // pour BUY : le high s'approche de la VWAP
-  const distanceFromVwapPct = Math.abs(priceVsVwapPct)
-
-  const cvdDelta = lastCvd.cvd - prevCvd.cvd
-  const sweepAgeMin = (Date.now() - sweep.detectedAt) / 1000 / 60
-
-  const aboveVwap = lastK.close > lastV.vwap
-  const belowVwap = lastK.close < lastV.vwap
-
-  // Détection rejet/reclaim VWAP — mèche touche + close du bon côté
-  const prevK = klines.at(-2)
-  const prevV = vwap.at(-2)
-
-  // SELL : mèche basse touche ou passe sous la VWAP ET close reste sous la VWAP
-  const vwapReject = (
-    contactPriceSell <= lastV.vwap && belowVwap
-  ) || (
-    !!prevK && !!prevV && prevK.close > prevV.vwap && lastK.close < lastV.vwap
-  )
-
-  // BUY : mèche haute touche ou passe au-dessus de la VWAP ET close reste au-dessus
-  const vwapReclaim = (
-    contactPriceBuy >= lastV.vwap && aboveVwap
-  ) || (
-    !!prevK && !!prevV && prevK.close < prevV.vwap && lastK.close > lastV.vwap
-  )
-
-  // Distance sur la mèche pour le filtre d'entrée
-  const distanceSell = Math.abs((contactPriceSell - lastV.vwap) / lastV.vwap) * 100
-  const distanceBuy  = Math.abs((contactPriceBuy  - lastV.vwap) / lastV.vwap) * 100
-
-  // Structure LH/HL
-  const prev3K = klines.at(-4)
-  const lhStructure = !!prev3K && lastK.high < prev3K.high
-  const hlStructure = !!prev3K && lastK.low > prev3K.low
-
-  const cvdNonStable = Math.abs(cvdDelta) > 0
-
-  const metrics = {
-    priceVsVwapPct,
-    cvdDelta,
-    distanceFromVwapPct,
-    wickDistancePct: sweep.direction === 'high' ? distanceSell : distanceBuy,
-    fundingRate,
-  }
-
-  // ── SETUP SELL (sweep HIGH) ──
-  if (sweep.direction === 'high') {
-    let score = 0
-    const reasons: string[] = []
-
-    // L (1pt)
-    score += 1
-    reasons.push(`L: Sweep HIGH (${sweepAgeMin.toFixed(0)}min).`)
-
-    // F CVD (1pt) — OI retiré du scoring (backtest: 0% lift)
-    if (cvdNonStable && lastCvd.delta <= 0) {
-      score += 1
-      reasons.push('F: CVD baissier (vendeurs agressifs).')
-    } else if (cvdNonStable) {
-      score += 1
-      reasons.push('F: CVD non-stable.')
-    }
-
-    // R VWAP (2pts) — critère le plus prédictif (+44% lift)
-    if (vwapReject || belowVwap) {
-      score += 2
-      reasons.push('R: Rejet VWAP confirmé (2pts).')
-    }
-
-    // R Structure (1pt)
-    if (lhStructure) {
-      score += 1
-      reasons.push('R: Structure LH confirmée.')
-    }
-
-    // Score exactement 4/5 — le 5/5 est en retard (validé par backtest)
-    if (score === 4) {
-      return {
-        action: 'SELL', score, reasons,
-        vwap: lastV.vwap, sweepAge: sweepAgeMin,
-        metrics, marketRegime, volatilityBucket,
-      }
-    }
-
-    return {
-      action: 'STABLE', score, reasons: [`Score ${score}/5 — sweep HIGH actif ${sweepAgeMin.toFixed(0)}min.`],
-      vwap: lastV.vwap, sweepAge: sweepAgeMin, metrics, marketRegime, volatilityBucket,
-    }
-  }
-
-  // ── SETUP BUY (sweep LOW) ──
-  if (sweep.direction === 'low') {
-    let score = 0
-    const reasons: string[] = []
-
-    // L (1pt)
-    score += 1
-    reasons.push(`L: Sweep LOW (${sweepAgeMin.toFixed(0)}min).`)
-
-    // F CVD (1pt)
-    if (cvdNonStable && lastCvd.delta >= 0) {
-      score += 1
-      reasons.push('F: CVD haussier (acheteurs agressifs).')
-    } else if (cvdNonStable) {
-      score += 1
-      reasons.push('F: CVD non-stable.')
-    }
-
-    // R VWAP (2pts)
-    if (vwapReclaim || aboveVwap) {
-      score += 2
-      reasons.push('R: Reclaim VWAP confirmé (2pts).')
-    }
-
-    // R Structure (1pt)
-    if (hlStructure) {
-      score += 1
-      reasons.push('R: Structure HL confirmée.')
-    }
-
-    // Score exactement 4/5
-    if (score === 4) {
-      return {
-        action: 'BUY', score, reasons,
-        vwap: lastV.vwap, sweepAge: sweepAgeMin,
-        metrics, marketRegime, volatilityBucket,
-      }
-    }
-
-    return {
-      action: 'STABLE', score, reasons: [`Score ${score}/5 — sweep LOW actif ${sweepAgeMin.toFixed(0)}min.`],
-      vwap: lastV.vwap, sweepAge: sweepAgeMin, metrics, marketRegime, volatilityBucket,
-    }
-  }
-
-  return { ...stable, reasons: ['Direction sweep inconnue.'] }
+  return atr
 }
 
-// ─── HANDLER PRINCIPAL ────────────────────────────────────────────────────────
+function computeRollingVWAPAt(bars: MergedBar[], i: number, vwapWindow: number): number {
+  const window = bars.slice(Math.max(0, i - vwapWindow), i + 1)
+  let pv = 0, vol = 0
+  for (const b of window) {
+    const typical = (b.high + b.low + b.close) / 3
+    pv += typical * b.volume
+    vol += b.volume
+  }
+  return vol > 0 ? pv / vol : bars[i].close
+}
+
+function deltaDominanceOverWindow(bars: MergedBar[], startIdx: number, endIdx: number): number {
+  let netVol = 0, grossVol = 0
+  for (let i = startIdx; i <= endIdx; i++) {
+    const b = bars[i]
+    const sign = b.close > b.open ? 1 : b.close < b.open ? -1 : 0
+    netVol += sign * b.volume
+    grossVol += b.volume
+  }
+  return grossVol > 0 ? netVol / grossVol : 0
+}
+
+type SwingPoint = { idx: number; price: number; confirmedAt: number }
+
+function computeSwingPoints(bars: DailyBar[], lookback: number): { highs: SwingPoint[]; lows: SwingPoint[] } {
+  const highs: SwingPoint[] = []
+  const lows: SwingPoint[] = []
+  for (let i = lookback; i < bars.length - lookback; i++) {
+    const windowBars = bars.slice(i - lookback, i + lookback + 1)
+    const maxHigh = Math.max(...windowBars.map(b => b.high))
+    const minLow = Math.min(...windowBars.map(b => b.low))
+    if (bars[i].high === maxHigh) highs.push({ idx: i, price: bars[i].high, confirmedAt: i + lookback })
+    if (bars[i].low === minLow) lows.push({ idx: i, price: bars[i].low, confirmedAt: i + lookback })
+  }
+  return { highs, lows }
+}
+
+function computeDowTrendLabels(bars: DailyBar[], highs: SwingPoint[], lows: SwingPoint[]): TrendRegime[] {
+  const labels: TrendRegime[] = new Array(bars.length).fill('undefined')
+  type SwingEvent = { confirmedAt: number; type: 'high' | 'low'; point: SwingPoint }
+  const events: SwingEvent[] = [
+    ...highs.map(h => ({ confirmedAt: h.confirmedAt, type: 'high' as const, point: h })),
+    ...lows.map(l => ({ confirmedAt: l.confirmedAt, type: 'low' as const, point: l })),
+  ].sort((a, b) => a.confirmedAt - b.confirmedAt)
+
+  let lastHigh: SwingPoint | null = null, prevHigh: SwingPoint | null = null
+  let lastLow: SwingPoint | null = null, prevLow: SwingPoint | null = null
+  let currentTrend: TrendRegime = 'undefined'
+  let filledUpTo = 0
+
+  for (const ev of events) {
+    const fillEnd = Math.min(ev.confirmedAt, bars.length)
+    for (let i = filledUpTo; i < fillEnd; i++) labels[i] = currentTrend
+    filledUpTo = fillEnd
+    if (ev.type === 'high') { prevHigh = lastHigh; lastHigh = ev.point } else { prevLow = lastLow; lastLow = ev.point }
+    if (lastHigh && prevHigh && lastLow && prevLow) {
+      const higherHigh = lastHigh.price > prevHigh.price
+      const higherLow = lastLow.price > prevLow.price
+      const lowerHigh = lastHigh.price < prevHigh.price
+      const lowerLow = lastLow.price < prevLow.price
+      if (higherHigh && higherLow) currentTrend = 'up'
+      else if (lowerHigh && lowerLow) currentTrend = 'down'
+      // signal mixte → la tendance en cours continue, inchangée
+    }
+  }
+  for (let i = filledUpTo; i < bars.length; i++) labels[i] = currentTrend
+  return labels
+}
+
+function regimeTrendAtTime(dailyBars: DailyBar[], dailyTrendLabels: TrendRegime[], time: number): TrendRegime {
+  let lo = 0, hi = dailyBars.length - 1, ans = -1
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (dailyBars[mid].time <= time) { ans = mid; lo = mid + 1 } else { hi = mid - 1 }
+  }
+  return ans === -1 ? 'undefined' : dailyTrendLabels[ans]
+}
+
+type Trigger = { time: number; priceMovePct: number; oiChangePct: number; dominance: number }
+
+// Détection UP — BTC/ETH/SOL, edge principal validé.
+function detectUpSqueezeAt(bars: MergedBar[], atr: number[], i: number): Trigger | null {
+  const startIdx = i - LOOKBACK_BARS + 1
+  if (startIdx < ATR_PERIOD) return null
+  const startBar = bars[startIdx]
+  const endBar = bars[i]
+  const priceMove = endBar.close - startBar.close
+  if (priceMove <= 0) return null
+  const priceMovePct = (priceMove / startBar.close) * 100
+  if (priceMove <= ATR_MULT_UP * atr[i]) return null
+  const oiStart = startBar.oi
+  const oiEnd = endBar.oi
+  if (!oiStart || oiStart <= 0) return null
+  const oiChangePct = ((oiEnd - oiStart) / oiStart) * 100
+  if (oiChangePct > -OI_DROP_PCT) return null
+  const dominance = deltaDominanceOverWindow(bars, startIdx, i)
+  if (dominance < DOM_UP) return null
+  return { time: endBar.time, priceMovePct, oiChangePct, dominance }
+}
+
+// Détection DOWN — XRP uniquement, edge moins rigoureusement validé
+// (découvert en cours d'analyse, jamais optimisé indépendamment comme
+// BTC/ETH/SOL). Miroir exact de detectUpSqueezeAt.
+function detectDownSqueezeAt(bars: MergedBar[], atr: number[], i: number): Trigger | null {
+  const startIdx = i - LOOKBACK_BARS + 1
+  if (startIdx < ATR_PERIOD) return null
+  const startBar = bars[startIdx]
+  const endBar = bars[i]
+  const priceMove = endBar.close - startBar.close
+  if (priceMove >= 0) return null
+  const priceMovePct = (priceMove / startBar.close) * 100
+  if (Math.abs(priceMove) <= ATR_MULT_DOWN * atr[i]) return null
+  const oiStart = startBar.oi
+  const oiEnd = endBar.oi
+  if (!oiStart || oiStart <= 0) return null
+  const oiChangePct = ((oiEnd - oiStart) / oiStart) * 100
+  if (oiChangePct > -OI_DROP_PCT) return null
+  const dominance = deltaDominanceOverWindow(bars, startIdx, i)
+  if (dominance > -DOM_DOWN) return null
+  return { time: endBar.time, priceMovePct, oiChangePct, dominance }
+}
+
+// ─── RÉGIME DOW DAILY (caché, rafraîchi au maximum 1x/heure par symbole) ────
+
+async function getDailyRegime(symbol: string): Promise<{ dailyBars: DailyBar[]; trendLabels: TrendRegime[] }> {
+  const cached = loadDailyRegimeCache(symbol)
+  if (cached && Date.now() - cached.fetchedAt < REGIME_REFRESH_MS) {
+    return { dailyBars: cached.dailyBars, trendLabels: cached.trendLabels }
+  }
+  const dailyKlines = await fetchKlines(symbol, 'D', DAILY_FETCH_LIMIT)
+  const dailyBarsFull: DailyBar[] = dailyKlines.map(k => ({ time: k.time, high: k.high, low: k.low }))
+  const { highs, lows } = computeSwingPoints(dailyBarsFull, SWING_LOOKBACK_DAILY)
+  const trendLabels = computeDowTrendLabels(dailyBarsFull, highs, lows)
+  saveDailyRegimeCache({ fetchedAt: Date.now(), dailyBars: dailyBarsFull, trendLabels }, symbol)
+  return { dailyBars: dailyBarsFull, trendLabels }
+}
+
+// ─── LOG CSV DES SIGNAUX ─────────────────────────────────────────────────────
 
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '/data'
 const SIGNAL_LOG = path.join(DATA_DIR, 'signal-log.csv')
@@ -445,23 +355,16 @@ const SIGNAL_LOG = path.join(DATA_DIR, 'signal-log.csv')
 function logSignalCSV(row: {
   time: string
   slot: string
-  score: number
   action: string
-  sweep_active: boolean
-  sweep_age_min: number
-  sweep_direction: string
-  vwap_distance_pct: number
-  vwap_distance_ok: boolean
-  cooldown: boolean
-  funding_blocked: boolean
-  has_position: boolean
-  weekend: boolean
+  daily_regime: string
+  pending_trigger: boolean
+  bars_waited: number
   trade_taken: boolean
-  reason_no_trade: string
   price: number
   vwap: number
+  oi_change_pct: number
+  dominance: number
   funding_rate: number
-  cvd_delta: number
 }) {
   try {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
@@ -480,228 +383,284 @@ function logSignalCSV(row: {
   }
 }
 
+// ─── HANDLER PRINCIPAL ────────────────────────────────────────────────────────
+
+type SlotSignalResult = {
+  action: 'BUY' | 'SELL' | 'STABLE'
+  reasons: string[]
+  vwap: number
+  dailyRegime: TrendRegime
+  pendingTrigger: { triggerTime: number; barsWaited: number; consecutiveCount: number } | null
+  metrics: { priceVsVwapPct: number; oiChangePct: number; dominance: number; fundingRate: number }
+}
+
 export async function GET(req: NextRequest) {
   const weekend = isWeekend()
 
   try {
-    // Fetch données communes BTC
-    const [btcKlines1h, btcKlines15m, btcOI1h, btcOI15m, btcTicker, btcFunding] = await Promise.all([
+    const [btcKlines, ethKlines, solKlines, xrpKlines] = await Promise.all([
       fetchKlines('BTCUSDT', '60', 200),
-      fetchKlines('BTCUSDT', '15', 200),
-      fetchCurrentOI('BTCUSDT', '1h'),
-      fetchCurrentOI('BTCUSDT', '15min'),
-      fetchTicker('BTCUSDT'),
-      fetchFundingRate('BTCUSDT'),
-    ])
-
-    // Fetch données communes ETH
-    const [ethKlines1h, ethKlines15m, ethOI1h, ethOI15m, ethTicker, ethFunding] = await Promise.all([
       fetchKlines('ETHUSDT', '60', 200),
-      fetchKlines('ETHUSDT', '15', 200),
+      fetchKlines('SOLUSDT', '60', 200),
+      fetchKlines('XRPUSDT', '60', 200),
+    ])
+    const [btcOI, ethOI, solOI, xrpOI] = await Promise.all([
+      fetchCurrentOI('BTCUSDT', '1h'),
       fetchCurrentOI('ETHUSDT', '1h'),
-      fetchCurrentOI('ETHUSDT', '15min'),
+      fetchCurrentOI('SOLUSDT', '1h'),
+      fetchCurrentOI('XRPUSDT', '1h'),
+    ])
+    const [btcTicker, ethTicker, solTicker, xrpTicker] = await Promise.all([
+      fetchTicker('BTCUSDT'),
       fetchTicker('ETHUSDT'),
+      fetchTicker('SOLUSDT'),
+      fetchTicker('XRPUSDT'),
+    ])
+    const [btcFunding, ethFunding, solFunding, xrpFunding] = await Promise.all([
+      fetchFundingRate('BTCUSDT'),
       fetchFundingRate('ETHUSDT'),
+      fetchFundingRate('SOLUSDT'),
+      fetchFundingRate('XRPUSDT'),
     ])
 
-    // Init OI buffers si nécessaire
     await Promise.all([
-      initOIBuffer('BTC-1h', '1h'),
-      initOIBuffer('ETH-1h', '1h'),
-      initOIBuffer('BTC-15m', '15min'),
-      initOIBuffer('ETH-15m', '15min'),
+      initOIBuffer('BTC-1h', 'BTCUSDT', '1h'),
+      initOIBuffer('ETH-1h', 'ETHUSDT', '1h'),
+      initOIBuffer('SOL-1h', 'SOLUSDT', '1h'),
+      initOIBuffer('XRP-1h', 'XRPUSDT', '1h'),
     ])
+    pushOiSnapshot('BTC-1h', btcOI)
+    pushOiSnapshot('ETH-1h', ethOI)
+    pushOiSnapshot('SOL-1h', solOI)
+    pushOiSnapshot('XRP-1h', xrpOI)
 
-    // Push snapshots OI
-    pushOiSnapshot('BTC-1h', btcOI1h)
-    pushOiSnapshot('ETH-1h', ethOI1h)
-    pushOiSnapshot('BTC-15m', btcOI15m)
-    pushOiSnapshot('ETH-15m', ethOI15m)
-
-    // Construire les données par slot
-    const slotData: Record<SlotKey, {
-      klines: typeof btcKlines1h
-      vwap: { time: number; vwap: number }[]
-      cvd: { time: number; delta: number; cvd: number }[]
-      oi: OIBar[]
+    const slotRaw: Record<SlotKey, {
+      symbol: string
+      klines: typeof btcKlines
       ticker: typeof btcTicker
       funding: typeof btcFunding
     }> = {
-      'BTC-1h':  { klines: btcKlines1h,  vwap: calculateVWAP(btcKlines1h, 200),  cvd: calculateCVD([], btcKlines1h),  oi: buildOiSeriesForKlines('BTC-1h', btcKlines1h),   ticker: btcTicker, funding: btcFunding },
-      'ETH-1h':  { klines: ethKlines1h,  vwap: calculateVWAP(ethKlines1h, 200),  cvd: calculateCVD([], ethKlines1h),  oi: buildOiSeriesForKlines('ETH-1h', ethKlines1h),   ticker: ethTicker, funding: ethFunding },
-      'BTC-15m': { klines: btcKlines15m, vwap: calculateVWAP(btcKlines15m, 200), cvd: calculateCVD([], btcKlines15m), oi: buildOiSeriesForKlines('BTC-15m', btcKlines15m), ticker: btcTicker, funding: btcFunding },
-      'ETH-15m': { klines: ethKlines15m, vwap: calculateVWAP(ethKlines15m, 200), cvd: calculateCVD([], ethKlines15m), oi: buildOiSeriesForKlines('ETH-15m', ethKlines15m), ticker: ethTicker, funding: ethFunding },
+      'BTC-1h': { symbol: 'BTCUSDT', klines: btcKlines, ticker: btcTicker, funding: btcFunding },
+      'ETH-1h': { symbol: 'ETHUSDT', klines: ethKlines, ticker: ethTicker, funding: ethFunding },
+      'SOL-1h': { symbol: 'SOLUSDT', klines: solKlines, ticker: solTicker, funding: solFunding },
+      'XRP-1h': { symbol: 'XRPUSDT', klines: xrpKlines, ticker: xrpTicker, funding: xrpFunding },
     }
 
-    const slotSignals: Record<SlotKey, SignalResult> = {} as Record<SlotKey, SignalResult>
+    const slotSignals: Record<SlotKey, SlotSignalResult> = {} as Record<SlotKey, SlotSignalResult>
 
-    // Traiter chaque slot indépendamment
     for (const config of SLOT_CONFIGS) {
-      const { slot } = config
-      const data = slotData[slot]
+      const { slot, symbol, direction, regimeFiltered } = config
+      const { klines, funding } = slotRaw[slot]
 
-      // Évaluer les positions ouvertes
-      evaluateOpenSetups(data.klines, slot)
+      // Évaluer les positions ouvertes (SL/TP) — générique, inchangé
+      evaluateOpenSetups(klines, slot)
 
-      // Détecter sweep
-      detectAndUpdateSweep(slot, data.klines, data.oi, data.cvd)
+      const oiSeries = buildOiSeriesForKlines(slot, klines)
+      const bars: MergedBar[] = klines.map((k, i) => ({
+        time: k.time, open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
+        oi: oiSeries[i]?.openInterest ?? 0,
+      }))
+      const atr = computeATR(bars, ATR_PERIOD)
+      // Le régime est calculé pour tous les slots (affichage), mais ne
+      // filtre la décision de trade que si regimeFiltered=true (XRP en est
+      // exclu — voir le commentaire sur SLOT_CONFIGS plus haut).
+      const regime = await getDailyRegime(symbol)
+      const state: SqueezeDetectorState = loadSqueezeState(slot)
 
-      // Scorer le signal
-      const signal = computeSignal(slot, data.klines, data.vwap, data.cvd, data.funding)
-      slotSignals[slot] = signal
+      // On ne traite QUE les bougies plus récentes que la dernière déjà vue
+      // — essentiel ici car ce endpoint est interrogé toutes les 10s par le
+      // frontend, alors qu'une bougie H1 ne change qu'une fois par heure.
+      // Sans cette garde, la confirmation VWAP (qui doit prendre 2 BOUGIES,
+      // soit 2h) se déclencherait en quelques secondes au lieu de 2 heures.
+      const startIdx = bars.findIndex(b => b.time > state.lastBarTimeProcessed)
+      const indices: number[] = startIdx === -1 ? [] : bars.slice(startIdx).map((_, k) => startIdx + k)
 
-      // Trading si conditions réunies
-      if (!weekend && signal.action !== 'STABLE' && signal.score === 4) {
-        const cooldown = isInCooldown(slot)
-        // Distance sur la mèche (contact intrabar) plutôt que sur le close
-        const wickDistance = signal.metrics.wickDistancePct ?? signal.metrics.distanceFromVwapPct
-        const distanceOk = wickDistance <= config.vwapDistanceMax
-        const fundingRate = signal.metrics.fundingRate
-        const fundingBlocked = signal.action === 'BUY' && fundingRate > 0.0005
-          || signal.action === 'SELL' && fundingRate < -0.0005
+      let fired: { action: 'BUY' | 'SELL'; entryPrice: number; stopLoss: number; takeProfit: number; vwap: number; triggerTime: number } | null = null
 
-        const currentPos = getCurrentPosition(slot)
-        const lastK = data.klines.at(-1)
-        const referenceBarKey = `${slot}-${lastK?.time ?? 0}`
+      for (const i of indices) {
+        const bar = bars[i]
 
-        const canTrade = !cooldown && distanceOk && !fundingBlocked && !currentPos && !!data.ticker
-        const tradeTaken = canTrade && !hasRecentDuplicate(slot, signal.action as 'BUY' | 'SELL', Date.now())
-
-        // Déterminer la raison du non-trade
-        let reasonNoTrade = ''
-        if (!tradeTaken) {
-          if (cooldown) reasonNoTrade = 'cooldown'
-          else if (!distanceOk) reasonNoTrade = `vwap_trop_loin_${signal.metrics.distanceFromVwapPct.toFixed(3)}pct`
-          else if (fundingBlocked) reasonNoTrade = `funding_bloque_${fundingRate.toFixed(5)}`
-          else if (currentPos) reasonNoTrade = 'position_deja_ouverte'
-          else if (!data.ticker) reasonNoTrade = 'ticker_manquant'
-          else reasonNoTrade = 'duplicate_recent'
+        if (state.pendingTrigger) {
+          const vwapJ = computeRollingVWAPAt(bars, i, VWAP_WINDOW)
+          // UP→SELL : on attend un close SOUS la VWAP. DOWN→BUY (XRP) :
+          // on attend un close AU-DESSUS de la VWAP (reclaim).
+          const onOppositeSide = direction === 'up' ? bar.close < vwapJ : bar.close > vwapJ
+          if (onOppositeSide) {
+            state.pendingTrigger.consecutiveCount++
+            if (state.pendingTrigger.consecutiveCount >= CONFIRM_BARS) {
+              const entryPrice = bar.close
+              const stopLoss = direction === 'up'
+                ? state.pendingTrigger.windowHigh * (1 + SL_BUFFER_PCT)
+                : state.pendingTrigger.windowLow * (1 - SL_BUFFER_PCT)
+              const risk = Math.abs(entryPrice - stopLoss)
+              const rr = direction === 'up' ? RR_UP : RR_DOWN
+              const takeProfit = direction === 'up' ? entryPrice - risk * rr : entryPrice + risk * rr
+              fired = {
+                action: direction === 'up' ? 'SELL' : 'BUY',
+                entryPrice, stopLoss, takeProfit, vwap: vwapJ,
+                triggerTime: state.pendingTrigger.triggerTime,
+              }
+              state.pendingTrigger = null
+            }
+          } else {
+            state.pendingTrigger.consecutiveCount = 0
+          }
+          if (state.pendingTrigger) {
+            state.pendingTrigger.barsWaited++
+            if (state.pendingTrigger.barsWaited >= TTL_BARS) state.pendingTrigger = null
+          }
         }
 
-        // Log CSV
-        logSignalCSV({
-          time: new Date().toISOString(),
-          slot,
-          score: signal.score,
-          action: signal.action,
-          sweep_active: !!sweepStates[slot],
-          sweep_age_min: Math.round(signal.sweepAge ?? 0),
-          sweep_direction: sweepStates[slot]?.direction ?? '',
-          vwap_distance_pct: Math.round(signal.metrics.distanceFromVwapPct * 10000) / 10000,
-          vwap_distance_ok: distanceOk,
-          cooldown,
-          funding_blocked: fundingBlocked,
-          has_position: !!currentPos,
-          weekend,
-          trade_taken: tradeTaken,
-          reason_no_trade: tradeTaken ? 'trade_pris' : reasonNoTrade,
-          price: data.ticker?.price ?? 0,
-          vwap: Math.round(signal.vwap * 100) / 100,
-          funding_rate: fundingRate,
-          cvd_delta: Math.round(signal.metrics.cvdDelta * 100) / 100,
-        })
-
-        if (tradeTaken) {
-          console.log(`[TRADE] ${slot} openPosition: ${signal.action} @ ${data.ticker!.price}`)
-          await openPosition({
-            slot,
-            timestamp: Date.now(),
-            timeframe: config.timeframe,
-            action: signal.action as 'BUY' | 'SELL',
-            confidence: signal.score,
-            entryPrice: data.ticker!.price,
-            vwap: signal.vwap,
-            referenceBarKey,
-            signalType: signal.action === 'BUY' ? 'bullish_retest' : 'bearish_retest',
-            marketRegime: signal.marketRegime as 'trend' | 'range' | 'breakout' | 'reversal',
-            vwapDistancePct: signal.metrics.distanceFromVwapPct,
-            volatilityBucket: signal.volatilityBucket as 'low' | 'medium' | 'high',
-          })
-          // Reset sweep après entrée
-          sweepStates[slot] = null
-          saveSweepState(null, slot)
+        const hoursSinceLastTrigger = (bar.time - state.lastTriggerTime) / 3600
+        if (!state.pendingTrigger && hoursSinceLastTrigger >= COOLDOWN_HOURS) {
+          const trigger = direction === 'up'
+            ? detectUpSqueezeAt(bars, atr, i)
+            : detectDownSqueezeAt(bars, atr, i)
+          if (trigger) {
+            const trend = regimeTrendAtTime(regime.dailyBars, regime.trendLabels, trigger.time)
+            // BTC/ETH/SOL (regimeFiltered=true) : il faut trend==='up'.
+            // XRP (regimeFiltered=false) : toujours accepté, le régime
+            // n'est calculé que pour l'affichage sur ce slot.
+            const passesRegimeGate = regimeFiltered ? trend === 'up' : true
+            if (passesRegimeGate) {
+              const windowStart = i - LOOKBACK_BARS + 1
+              const windowBars = bars.slice(windowStart, i + 1)
+              state.pendingTrigger = {
+                triggerTime: trigger.time,
+                windowHigh: Math.max(...windowBars.map(b => b.high)),
+                windowLow: Math.min(...windowBars.map(b => b.low)),
+                consecutiveCount: 0,
+                barsWaited: 0,
+              }
+            }
+            // Le cooldown démarre dès la DÉTECTION, qu'elle soit filtrée
+            // par le régime ou non — comme dans le moteur de backtest.
+            state.lastTriggerTime = trigger.time
+          }
         }
-      } else {
-        // Log aussi les signaux non-4/5 pour comprendre pourquoi rien ne se passe
-        const sweep = sweepStates[slot]
-        logSignalCSV({
-          time: new Date().toISOString(),
-          slot,
-          score: signal.score,
-          action: signal.action,
-          sweep_active: !!sweep,
-          sweep_age_min: Math.round(signal.sweepAge ?? 0),
-          sweep_direction: sweep?.direction ?? '',
-          vwap_distance_pct: Math.round(signal.metrics.distanceFromVwapPct * 10000) / 10000,
-          vwap_distance_ok: signal.metrics.distanceFromVwapPct <= config.vwapDistanceMax,
-          cooldown: isInCooldown(slot),
-          funding_blocked: false,
-          has_position: !!getCurrentPosition(slot),
-          weekend,
-          trade_taken: false,
-          reason_no_trade: weekend ? 'weekend' : signal.score < 4 ? `score_${signal.score}_sur_5` : 'stable_pas_de_sweep',
-          price: data.ticker?.price ?? 0,
-          vwap: Math.round(signal.vwap * 100) / 100,
-          funding_rate: signal.metrics.fundingRate,
-          cvd_delta: Math.round(signal.metrics.cvdDelta * 100) / 100,
-        })
+
+        state.lastBarTimeProcessed = bar.time
       }
+
+      saveSqueezeState(state, slot)
+
+      const lastBar = bars.at(-1)
+      const vwapNow = lastBar ? computeRollingVWAPAt(bars, bars.length - 1, VWAP_WINDOW) : 0
+      const dailyRegimeNow = regime.trendLabels.at(-1) ?? 'undefined'
+
+      // Métriques "live" diagnostiques sur la fenêtre la plus récente —
+      // affichage seulement, ne déclenchent rien (le trigger réel a déjà
+      // été évalué bougie par bougie ci-dessus).
+      const metricsStartIdx = bars.length - LOOKBACK_BARS
+      const liveOiChangePct = metricsStartIdx >= 0 && bars[metricsStartIdx].oi > 0
+        ? ((bars[bars.length - 1].oi - bars[metricsStartIdx].oi) / bars[metricsStartIdx].oi) * 100
+        : 0
+      const liveDominance = metricsStartIdx >= 0
+        ? deltaDominanceOverWindow(bars, metricsStartIdx, bars.length - 1)
+        : 0
+
+      if (fired && !getCurrentPosition(slot)) {
+        const referenceBarKey = `${slot}-${lastBar?.time ?? 0}`
+        const marketRegime = getMarketRegime(klines)
+        const volatilityBucket = getVolatilityBucket(klines)
+        const rr = direction === 'up' ? RR_UP : RR_DOWN
+        await openPosition({
+          slot,
+          timestamp: Date.now(),
+          timeframe: '1h',
+          action: fired.action,
+          confidence: 5,
+          entryPrice: fired.entryPrice,
+          vwap: fired.vwap,
+          referenceBarKey,
+          signalType: fired.action === 'SELL' ? 'bearish_retest' : 'bullish_retest',
+          marketRegime: marketRegime as 'trend' | 'range' | 'breakout' | 'reversal',
+          vwapDistancePct: Math.abs((fired.entryPrice - fired.vwap) / fired.vwap) * 100,
+          volatilityBucket: volatilityBucket as 'low' | 'medium' | 'high',
+          stopLoss: fired.stopLoss,
+          takeProfit: fired.takeProfit,
+          rr,
+        })
+        console.log(`[SQUEEZE] ${slot} ${fired.action} @ ${fired.entryPrice} (trigger ${new Date(fired.triggerTime * 1000).toISOString()})`)
+      }
+
+      slotSignals[slot] = {
+        action: fired ? fired.action : 'STABLE',
+        reasons: fired
+          ? [`Squeeze confirmé (${fired.action})${regimeFiltered ? ` — régime daily ${dailyRegimeNow}.` : '.'}`]
+          : state.pendingTrigger
+            ? [`Trigger ${direction === 'up' ? 'SELL' : 'BUY'} en attente de confirmation VWAP (${state.pendingTrigger.barsWaited}/${TTL_BARS}h, ${state.pendingTrigger.consecutiveCount}/${CONFIRM_BARS} confirmées).`]
+            : regimeFiltered
+              ? [`Aucun trigger actif — régime daily : ${dailyRegimeNow}.`]
+              : [`Aucun trigger actif (pas de filtre de régime sur ce slot).`],
+        vwap: vwapNow,
+        dailyRegime: dailyRegimeNow,
+        pendingTrigger: state.pendingTrigger ? {
+          triggerTime: state.pendingTrigger.triggerTime,
+          barsWaited: state.pendingTrigger.barsWaited,
+          consecutiveCount: state.pendingTrigger.consecutiveCount,
+        } : null,
+        metrics: {
+          priceVsVwapPct: lastBar && vwapNow ? ((lastBar.close - vwapNow) / vwapNow) * 100 : 0,
+          oiChangePct: liveOiChangePct,
+          dominance: liveDominance,
+          fundingRate: funding.rate,
+        },
+      }
+
+      logSignalCSV({
+        time: new Date().toISOString(),
+        slot,
+        action: slotSignals[slot].action,
+        daily_regime: dailyRegimeNow,
+        pending_trigger: !!state.pendingTrigger,
+        bars_waited: state.pendingTrigger?.barsWaited ?? 0,
+        trade_taken: !!fired,
+        price: lastBar?.close ?? 0,
+        vwap: Math.round(vwapNow * 100) / 100,
+        oi_change_pct: Math.round(liveOiChangePct * 10000) / 10000,
+        dominance: Math.round(liveDominance * 1000) / 1000,
+        funding_rate: funding.rate,
+      })
     }
 
     return NextResponse.json({
-      // Données principales BTC 1h pour l'UI
-      klines: slotData['BTC-1h'].klines,
-      vwap: slotData['BTC-1h'].vwap,
-      cvd: slotData['BTC-1h'].cvd,
-      oi: slotData['BTC-1h'].oi,
+      // BTC-1h pour compatibilité avec le graphique principal de l'UI
+      klines: btcKlines,
+      vwap: calculateVWAP(btcKlines, 200),
+      cvd: calculateCVD([], btcKlines),
+      oi: buildOiSeriesForKlines('BTC-1h', btcKlines),
       ticker: btcTicker,
       funding: btcFunding,
 
-      // Signal principal (BTC 1h pour compatibilité UI)
+      // Signal principal (BTC-1h, pour compatibilité avec TradeSignalPanel)
       signal: {
         action: slotSignals['BTC-1h'].action,
-        confidence: slotSignals['BTC-1h'].score,
-        signalType: slotSignals['BTC-1h'].action === 'BUY' ? 'bullish_retest'
-          : slotSignals['BTC-1h'].action === 'SELL' ? 'bearish_retest' : 'neutral',
-        marketRegime: slotSignals['BTC-1h'].marketRegime,
-        volatilityBucket: slotSignals['BTC-1h'].volatilityBucket,
+        confidence: slotSignals['BTC-1h'].action === 'SELL' ? 5 : 1,
+        signalType: slotSignals['BTC-1h'].action === 'SELL' ? 'bearish_retest' : 'neutral',
+        marketRegime: getMarketRegime(btcKlines),
+        volatilityBucket: getVolatilityBucket(btcKlines),
         vwap: slotSignals['BTC-1h'].vwap,
         reasons: slotSignals['BTC-1h'].reasons,
-        sweepAge: slotSignals['BTC-1h'].sweepAge,
         metrics: {
-          ...slotSignals['BTC-1h'].metrics,
-          oiDeltaPct: 0,
+          priceVsVwapPct: slotSignals['BTC-1h'].metrics.priceVsVwapPct,
+          // "Dominance" — relabellé côté UI dans TradeSignalPanel.tsx
+          cvdDelta: slotSignals['BTC-1h'].metrics.dominance,
+          oiDeltaPct: slotSignals['BTC-1h'].metrics.oiChangePct,
+          fundingRate: slotSignals['BTC-1h'].metrics.fundingRate,
           oiChangeAbs: 0,
+          distanceFromVwapPct: Math.abs(slotSignals['BTC-1h'].metrics.priceVsVwapPct),
         },
       },
 
-      // Tous les signaux des 4 slots
-      slotSignals: Object.fromEntries(
-        Object.entries(slotSignals).map(([k, v]) => [k, {
-          action: v.action, score: v.score, reasons: v.reasons,
-          vwap: v.vwap, sweepAge: v.sweepAge, metrics: v.metrics,
-        }])
-      ),
-
-      // Positions et stats
+      // Les 4 slots
+      slotSignals,
       allPositions: getAllPositions(),
       currentPosition: getCurrentPosition('BTC-1h'),
       setupHistory: getRecentSetups(),
       setupStats: getStats(),
       slotStats: getSlotStats(),
       sessionStats: getSessionStats(),
-
-      // Sweeps actifs
-      activeSweeps: Object.fromEntries(
-        (['BTC-1h', 'ETH-1h', 'BTC-15m', 'ETH-15m'] as SlotKey[]).map(slot => [
-          slot,
-          sweepStates[slot] ? {
-            direction: sweepStates[slot]!.direction,
-            ageMinutes: Math.round((Date.now() - sweepStates[slot]!.detectedAt) / 60000),
-            structureLevel: sweepStates[slot]!.structureLevel,
-          } : null
-        ])
-      ),
 
       weekend,
       lastUpdate: Date.now(),
