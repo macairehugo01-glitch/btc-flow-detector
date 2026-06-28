@@ -38,7 +38,6 @@ export function useMarketData() {
         slotSignals: data.slotSignals ?? null,
         allPositions: data.allPositions ?? null,
         slotStats: data.slotStats ?? null,
-        activeSweeps: data.activeSweeps ?? null,
       })
 
       setConnected(true)
