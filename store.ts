@@ -4,7 +4,7 @@ import { sendTelegramMessage } from './lib/telegram'
 // ─── TYPES ───────────────────────────────────────────────────────────────────
 
 type SetupStatus = 'open' | 'win' | 'loss'
-export type SlotKey = 'BTC-1h' | 'BTC-15m' | 'ETH-1h' | 'ETH-15m'
+export type SlotKey = 'BTC-1h' | 'ETH-1h' | 'SOL-1h' | 'XRP-1h'
 export type SessionName = 'Asia' | 'London' | 'New York'
 export type Timeframe = '1m' | '5m' | '15m' | '1h'
 
@@ -97,11 +97,11 @@ type PersistedState = {
   currentPosition?: LivePosition
   lastLossTimestamp?: number | null
   lastReverseBarKey?: string | null
-  // Nouveau format 4 slots
+  // Format 4 slots
   slots: Record<SlotKey, SlotState>
 }
 
-const ALL_SLOTS: SlotKey[] = ['BTC-1h', 'BTC-15m', 'ETH-1h', 'ETH-15m']
+const ALL_SLOTS: SlotKey[] = ['BTC-1h', 'ETH-1h', 'SOL-1h', 'XRP-1h']
 
 const DEFAULT_SLOT: SlotState = {
   position: null,
@@ -112,10 +112,10 @@ const DEFAULT_SLOT: SlotState = {
 const initialState: PersistedState = {
   setups: [],
   slots: {
-    'BTC-1h':  { ...DEFAULT_SLOT },
-    'BTC-15m': { ...DEFAULT_SLOT },
-    'ETH-1h':  { ...DEFAULT_SLOT },
-    'ETH-15m': { ...DEFAULT_SLOT },
+    'BTC-1h': { ...DEFAULT_SLOT },
+    'ETH-1h': { ...DEFAULT_SLOT },
+    'SOL-1h': { ...DEFAULT_SLOT },
+    'XRP-1h': { ...DEFAULT_SLOT },
   },
 }
 
@@ -125,11 +125,14 @@ const state = loadJournalFile<PersistedState>(initialState)
 if (!state.slots) {
   state.slots = {
     'BTC-1h':  { position: state.currentPosition ?? null, lastLossTimestamp: state.lastLossTimestamp ?? null, lastReferenceBarKey: state.lastReverseBarKey ?? null },
-    'BTC-15m': { ...DEFAULT_SLOT },
     'ETH-1h':  { ...DEFAULT_SLOT },
-    'ETH-15m': { ...DEFAULT_SLOT },
+    'SOL-1h':  { ...DEFAULT_SLOT },
+    'XRP-1h':  { ...DEFAULT_SLOT },
   }
 }
+// Les anciens slots BTC-15m/ETH-15m (stratégie LFR précédente) restent
+// orphelins dans le fichier persisté si présents — inoffensif, jamais lus
+// puisque ALL_SLOTS ne les contient plus.
 for (const slot of ALL_SLOTS) {
   if (!state.slots[slot]) state.slots[slot] = { ...DEFAULT_SLOT }
 }
@@ -160,7 +163,7 @@ function hourBucketFromTimestamp(tsMs: number) {
 
 function buildRiskLevels(entryPrice: number, action: 'BUY' | 'SELL', vwap: number) {
   const VWAP_BUFFER = 0.0015
-  const RR = 3 // TP 3R — validé par backtest
+  const RR = 3 // TP 3R — validé par backtest (ancienne stratégie LFR)
 
   const stopLoss = action === 'BUY'
     ? vwap * (1 - VWAP_BUFFER)
@@ -242,8 +245,11 @@ export function getLastReferenceBarKey(slot: SlotKey): string | null {
 export function isInCooldown(slot: SlotKey): boolean {
   const lastLoss = state.slots[slot]?.lastLossTimestamp
   if (!lastLoss) return false
-  // 4h cooldown sur 1h, 1h sur 15m — validé par backtest
-  const cooldownMs = slot.includes('1h') ? 4 * 60 * 60 * 1000 : 60 * 60 * 1000
+  // Cooldown générique après une perte — NON utilisé par la stratégie
+  // squeeze actuelle, qui gère son propre cooldown (12h depuis la
+  // détection du trigger, indépendant des pertes) via journalPersistence's
+  // SqueezeDetectorState. Conservé ici pour compatibilité éventuelle.
+  const cooldownMs = 4 * 60 * 60 * 1000
   return Date.now() - lastLoss < cooldownMs
 }
 
@@ -321,8 +327,18 @@ export async function openPosition(input: {
   marketRegime: MarketRegime
   vwapDistancePct: number
   volatilityBucket: VolatilityBucket
+  // Optionnel — si les trois sont fournis, ils sont utilisés directement
+  // au lieu d'être dérivés de la VWAP via buildRiskLevels. Utilisé par la
+  // stratégie squeeze H1, dont le SL/TP est basé sur la fenêtre
+  // d'impulsion (windowHigh/windowLow), pas sur la VWAP.
+  stopLoss?: number
+  takeProfit?: number
+  rr?: number
 }) {
-  const { stopLoss, takeProfit, rr } = buildRiskLevels(input.entryPrice, input.action, input.vwap)
+  const useExplicitLevels = input.stopLoss !== undefined && input.takeProfit !== undefined && input.rr !== undefined
+  const { stopLoss, takeProfit, rr } = useExplicitLevels
+    ? { stopLoss: input.stopLoss!, takeProfit: input.takeProfit!, rr: input.rr! }
+    : buildRiskLevels(input.entryPrice, input.action, input.vwap)
 
   const setup: StoredSetup = {
     id: `${input.slot}-${input.action}-${input.timestamp}`,
