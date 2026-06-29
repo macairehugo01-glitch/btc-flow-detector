@@ -7,14 +7,20 @@ export const dynamic = 'force-dynamic'
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '/data'
 
 // ───────────────────────────────────────────────────────────────────
-// HYPOTHÈSE TESTÉE ICI : forme en cloche de l'OI, pas juste un solde
-// net. Séquence attendue pour un trigger "up" (= futur SELL) :
+// HYPOTHÈSE TESTÉE ICI : forme en cloche de l'OI — IDENTIQUE dans les
+// deux sens, parce que l'OI ne distingue pas long/short.
 //
-//   Phase 1 (FOMO)            : OI MONTE du début de fenêtre au pic
-//   Phase 2 (haut du pump)    : OI redescend déjà au moment du trigger
-//   Phase 3 (dump vers VWAP)  : OI continue de baisser pendant la
+//   Phase 1 (FOMO)            : OI MONTE (positions qui s'ouvrent,
+//                                que ce soit des longs sur un pump
+//                                ou des shorts sur un dump)
+//   Phase 2 (haut/bas du move): OI redescend déjà au moment du trigger
+//   Phase 3 (retour vers VWAP): OI continue de baisser pendant la
 //                                confirmation (vérifié en plus du
 //                                croisement VWAP existant)
+//
+// Le sens du PRIX (up/down) détermine seulement SELL vs BUY et le
+// sens de la confirmation VWAP — la FORME de l'OI recherchée (pic,
+// pas creux) est la même dans les deux cas.
 //
 // Différent du détecteur actuel (squeeze/route.ts) qui ne regarde
 // que le solde net OI(fin) - OI(début) sur 5 bougies, sans forme.
@@ -94,7 +100,8 @@ function detectBellShapeAt(
   pumpLookback: number,
   impulseAtrMult: number,
   oiRiseMinPct: number,
-  oiDropFromPeakMinPct: number
+  oiDropFromPeakMinPct: number,
+  maxPeakOffsetBars: number
 ): { direction: SqueezeDirection; priceMovePct: number; oiRiseToPeakPct: number; oiDropFromPeakPct: number; peakOffsetBars: number } | null {
   const windowStart = i - pumpLookback + 1
   if (windowStart < 0) return null
@@ -111,29 +118,31 @@ function detectBellShapeAt(
 
   if (!startBar.oi || startBar.oi <= 0) return null
 
-  // Trouver le pic d'OI dans la fenêtre — pour "up" on cherche un
-  // MAX (FOMO de longs) ; pour "down" un MIN (FOMO de shorts, par
-  // symétrie : capitulation vendeuse puis short-covering qui fait
-  // remonter le prix).
+  // Trouver le pic d'OI dans la fenêtre — TOUJOURS un maximum, peu
+  // importe la direction du prix. L'OI ne distingue pas long/short :
+  // un "fake pump" (FOMO de nouveaux longs) et un "fake dump" (FOMO
+  // de nouveaux shorts) produisent tous les deux la même forme —
+  // OI qui monte (positions qui s'ouvrent) puis qui descend
+  // (positions qui se ferment en panique/liquidation), peu importe
+  // le sens du prix.
   let peakIdx = windowStart
   let peakOi = bars[windowStart].oi
   for (let k = windowStart; k <= i; k++) {
-    if (direction === 'up' && bars[k].oi > peakOi) { peakOi = bars[k].oi; peakIdx = k }
-    if (direction === 'down' && bars[k].oi < peakOi) { peakOi = bars[k].oi; peakIdx = k }
+    if (bars[k].oi > peakOi) { peakOi = bars[k].oi; peakIdx = k }
   }
 
   // Le pic ne doit pas être la dernière bougie — il faut qu'il y ait
   // déjà une redescente amorcée au moment du trigger (phase 2).
   if (peakIdx === i) return null
 
-  const oiRiseToPeakPct = direction === 'up'
-    ? ((peakOi - startBar.oi) / startBar.oi) * 100
-    : ((startBar.oi - peakOi) / startBar.oi) * 100 // pour 'down', "montée" = chute initiale
+  // Soudaineté du dump : le pic d'OI doit être à maxPeakOffsetBars
+  // bougies maximum du trigger.
+  if (i - peakIdx > maxPeakOffsetBars) return null
+
+  const oiRiseToPeakPct = ((peakOi - startBar.oi) / startBar.oi) * 100
   if (oiRiseToPeakPct < oiRiseMinPct) return null
 
-  const oiDropFromPeakPct = direction === 'up'
-    ? ((peakOi - endBar.oi) / peakOi) * 100
-    : ((endBar.oi - peakOi) / peakOi) * 100 // pour 'down', "redescente" = remontée de l'OI
+  const oiDropFromPeakPct = ((peakOi - endBar.oi) / peakOi) * 100
   if (oiDropFromPeakPct < oiDropFromPeakMinPct) return null
 
   return {
@@ -182,10 +191,11 @@ function resolveBellTrade(
     const onOppositeSide = triggerInfo.direction === 'up' ? closeJ < vwapJ : closeJ > vwapJ
 
     // Phase 3 : pendant l'attente de confirmation, l'OI doit
-    // continuer à baisser (direction 'up') ou monter (direction
-    // 'down') — preuve que la liquidation se poursuit vers le dump.
+    // continuer à baisser — dans les DEUX sens, puisque la forme
+    // recherchée est la même (pic puis chute) peu importe la
+    // direction du prix.
     if (requireOiKeepDropping) {
-      const stillDropping = triggerInfo.direction === 'up' ? bars[j].oi <= oiAtTrigger : bars[j].oi >= oiAtTrigger
+      const stillDropping = bars[j].oi <= oiAtTrigger
       if (!stillDropping) {
         return { ...base, confirmed: false, outcome: 'no_confirmation', rMultiple: 0, oiKeptDroppingDuringConfirm: false }
       }
@@ -258,6 +268,11 @@ export async function GET(req: Request) {
   const impulseAtrMult = Number(url.searchParams.get('atrMult') ?? 1.0)
   const oiRiseMinPct = Number(url.searchParams.get('oiRiseMin') ?? 2)
   const oiDropFromPeakMinPct = Number(url.searchParams.get('oiDropFromPeakMin') ?? 0.5)
+  // Soudaineté du dump : le pic d'OI doit être à maxPeakOffsetBars
+  // bougies maximum du trigger. Défaut=2 pour exiger un dump "d'un
+  // coup" comme décrit (pic puis chute quasi immédiate), au lieu de
+  // la valeur précédente qui acceptait jusqu'à 10 bougies d'écart.
+  const maxPeakOffsetBars = Number(url.searchParams.get('maxPeakOffsetBars') ?? 2)
   const requireOiKeepDropping = url.searchParams.get('requireOiKeepDropping') === 'true'
   const rr = Number(url.searchParams.get('rr') ?? 1.5)
   const ttlBars = Number(url.searchParams.get('ttl') ?? 8)
@@ -290,7 +305,7 @@ export async function GET(req: Request) {
 
     for (let i = pumpLookback + atrPeriod; i < bars.length - ttlBars - maxBarsToResolve; i++) {
       if (i - lastTriggerIdx < cooldownBars) continue
-      const triggerInfo = detectBellShapeAt(bars, atr, i, pumpLookback, impulseAtrMult, oiRiseMinPct, oiDropFromPeakMinPct)
+      const triggerInfo = detectBellShapeAt(bars, atr, i, pumpLookback, impulseAtrMult, oiRiseMinPct, oiDropFromPeakMinPct, maxPeakOffsetBars)
       if (triggerInfo) {
         events.push(resolveBellTrade(
           bars, i, triggerInfo, ttlBars, rr, vwapWindow, maxBarsToResolve,
@@ -310,7 +325,7 @@ export async function GET(req: Request) {
       timeframe: tf,
       paramsUsed: {
         pumpLookback, impulseAtrMult, oiRiseMinPct, oiDropFromPeakMinPct,
-        requireOiKeepDropping, rr, ttlBars, confirmBars, vwapWindow,
+        maxPeakOffsetBars, requireOiKeepDropping, rr, ttlBars, confirmBars, vwapWindow,
         maxBarsToResolve, cooldownBars,
       },
       totalBars: bars.length,
