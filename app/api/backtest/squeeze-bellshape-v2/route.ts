@@ -146,6 +146,7 @@ function validateSetup(
   searchFloor: number,
   maxPeakOffsetBars: number,
   oiRiseMinPct: number,
+  oiSpikeMinPct: number,
   oiDropFromPeakMinPct: number,
   impulseAtrMult: number,
   vwapWindow: number
@@ -165,7 +166,34 @@ function validateSetup(
   const riseStartIdx = findOiRiseStart(bars, peakIdx, searchFloor)
   if (!bars[riseStartIdx].oi || bars[riseStartIdx].oi <= 0) return null
   const oiRiseToPeakPct = ((peakOi - bars[riseStartIdx].oi) / bars[riseStartIdx].oi) * 100
-  if (oiRiseToPeakPct < oiRiseMinPct) return null
+
+  // NOUVEAU : le critère n'est plus la hausse CUMULÉE sur tout le
+  // segment, mais au moins UNE bougie individuelle dont l'OI a
+  // bondi de oiRiseMinPct% par rapport à la bougie précédente — un
+  // vrai sursaut soudain, pas une accumulation lente sur plusieurs
+  // heures qui finirait par dépasser le seuil sans jamais avoir de
+  // mouvement brusque.
+  let hasSuddenJump = false
+  for (let k = riseStartIdx + 1; k <= peakIdx; k++) {
+    if (!bars[k - 1].oi || bars[k - 1].oi <= 0) continue
+    const barOverBarPct = ((bars[k].oi - bars[k - 1].oi) / bars[k - 1].oi) * 100
+    if (barOverBarPct >= oiRiseMinPct) { hasSuddenJump = true; break }
+  }
+  if (!hasSuddenJump) return null
+
+  // 2b. NOUVEAU : sursaut bougie par bougie — au moins UNE bougie du
+  // segment doit montrer une hausse d'OI ≥ oiSpikeMinPct par rapport
+  // à la clôture d'OI de la bougie précédente. Différent du critère
+  // cumulé ci-dessus : ça détecte un VRAI sursaut ponctuel, pas une
+  // lente accumulation qui finit par dépasser le seuil.
+  let maxSingleBarRisePct = 0
+  for (let k = riseStartIdx + 1; k <= peakIdx; k++) {
+    if (bars[k - 1].oi > 0) {
+      const pct = ((bars[k].oi - bars[k - 1].oi) / bars[k - 1].oi) * 100
+      if (pct > maxSingleBarRisePct) maxSingleBarRisePct = pct
+    }
+  }
+  if (maxSingleBarRisePct < oiSpikeMinPct) return null
 
   // 3. Mouvement de prix "contraint" sur ce même segment dynamique
   // (ATR-prix pour l'instant — voir réserve en en-tête).
@@ -193,6 +221,24 @@ function calcStats(events: TradeEvent[]): StatBlock {
     winRate: Math.round(winRate * 1000) / 10,
     avgR: Math.round(avgR * 1000) / 1000,
     expectancy: Math.round(avgR * 1000) / 1000,
+  }
+}
+
+// Vitesse d'exécution : médiane plus pertinente que la moyenne ici,
+// puisque quelques trades très longs (mouvements prolongés rares)
+// déforment fortement la moyenne sans représenter le cas typique.
+function timingStats(events: TradeEvent[], outcome: 'win' | 'loss'): { median: number; mean: number; min: number; max: number; n: number } {
+  const values = events.filter(e => e.outcome === outcome && e.barsToClose != null).map(e => e.barsToClose as number).sort((a, b) => a - b)
+  if (values.length === 0) return { median: 0, mean: 0, min: 0, max: 0, n: 0 }
+  const mid = Math.floor(values.length / 2)
+  const median = values.length % 2 === 0 ? (values[mid - 1] + values[mid]) / 2 : values[mid]
+  const mean = values.reduce((s, v) => s + v, 0) / values.length
+  return {
+    median: Math.round(median * 10) / 10,
+    mean: Math.round(mean * 10) / 10,
+    min: values[0],
+    max: values[values.length - 1],
+    n: values.length,
   }
 }
 
@@ -342,6 +388,10 @@ export async function GET(req: Request) {
       byDirection: {
         up_to_sell: calcStats(upEvents),
         down_to_buy: calcStats(downEvents),
+      },
+      timingBars: {
+        wins: timingStats(events, 'win'),
+        losses: timingStats(events, 'loss'),
       },
       events: events.slice(-300),
     })
