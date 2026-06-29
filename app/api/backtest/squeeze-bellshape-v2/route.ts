@@ -228,6 +228,31 @@ function timingStats(events: TradeEvent[], outcome: 'win' | 'loss'): { median: n
   }
 }
 
+// NOUVEAU : découpage par trimestre calendaire — pour voir si
+// l'expectancy globale dépend fortement d'une sous-période précise
+// (régime de marché) plutôt que d'être stable dans le temps. Un
+// edge "vrai" devrait apparaître positif sur plusieurs trimestres
+// distincts, pas concentré sur un ou deux.
+function quarterLabel(unixSeconds: number): string {
+  const d = new Date(unixSeconds * 1000)
+  const q = Math.floor(d.getUTCMonth() / 3) + 1
+  return `${d.getUTCFullYear()}-Q${q}`
+}
+
+function statsByQuarter(events: TradeEvent[]): Record<string, StatBlock & { crossings: number }> {
+  const groups: Record<string, TradeEvent[]> = {}
+  for (const e of events) {
+    const label = quarterLabel(e.crossTime)
+    if (!groups[label]) groups[label] = []
+    groups[label].push(e)
+  }
+  const result: Record<string, StatBlock & { crossings: number }> = {}
+  for (const label of Object.keys(groups).sort()) {
+    result[label] = { ...calcStats(groups[label]), crossings: groups[label].length }
+  }
+  return result
+}
+
 export async function GET(req: Request) {
   const url = new URL(req.url)
   const symbol = (url.searchParams.get('symbol') ?? 'BTCUSDT').toUpperCase()
@@ -379,6 +404,7 @@ export async function GET(req: Request) {
         wins: timingStats(events, 'win'),
         losses: timingStats(events, 'loss'),
       },
+      byQuarter: statsByQuarter(events),
       events: events.slice(-300),
     })
   } catch (error) {
