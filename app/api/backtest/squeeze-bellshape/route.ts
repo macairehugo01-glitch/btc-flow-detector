@@ -166,15 +166,28 @@ function resolveBellTrade(
   requireOiKeepDropping: boolean,
   slBufferPct: number,
   pumpLookback: number,
-  slLookback: number
+  slLookback: number,
+  slAtOiPeak: boolean
 ): BellEvent {
-  // Fenêtre SL/TP dédiée, plus courte que pumpLookback — évite de
-  // placer le stop sur l'amplitude de TOUT le mouvement pump quand
-  // celui-ci est déjà bien avancé au moment du trigger.
-  const slWindowStart = triggerIdx - slLookback + 1
-  const windowBars = bars.slice(slWindowStart, triggerIdx + 1)
-  const windowHigh = Math.max(...windowBars.map(b => b.high))
-  const windowLow = Math.min(...windowBars.map(b => b.low))
+  let windowHigh: number
+  let windowLow: number
+
+  if (slAtOiPeak) {
+    // NOUVEAU : le SL s'ancre sur la bougie EXACTE où l'OI a atteint
+    // son pic — le moment du climax FOMO — plutôt que sur une
+    // fenêtre de prix arbitraire. peakIdx se déduit de
+    // peakOffsetBars (déjà calculé lors de la détection).
+    const peakIdx = triggerIdx - triggerInfo.peakOffsetBars
+    windowHigh = bars[peakIdx].high
+    windowLow = bars[peakIdx].low
+  } else {
+    // Comportement existant : fenêtre de prix de slLookback bougies
+    // se terminant au trigger.
+    const slWindowStart = triggerIdx - slLookback + 1
+    const windowBars = bars.slice(slWindowStart, triggerIdx + 1)
+    windowHigh = Math.max(...windowBars.map(b => b.high))
+    windowLow = Math.min(...windowBars.map(b => b.low))
+  }
 
   const base = {
     triggerTime: bars[triggerIdx].time,
@@ -281,6 +294,9 @@ export async function GET(req: Request) {
   // pumpLookback (comportement d'avant), mais testable séparément
   // pour éviter un stop placé sur l'amplitude du mouvement entier.
   const slLookback = Number(url.searchParams.get('slLookback') ?? pumpLookback)
+  // NOUVEAU : si true, le SL s'ancre sur la bougie du pic d'OI
+  // plutôt que sur une fenêtre de prix (slLookback est alors ignoré).
+  const slAtOiPeak = url.searchParams.get('slAtOiPeak') === 'true'
   const requireOiKeepDropping = url.searchParams.get('requireOiKeepDropping') === 'true'
   const rr = Number(url.searchParams.get('rr') ?? 1.5)
   const ttlBars = Number(url.searchParams.get('ttl') ?? 8)
@@ -317,7 +333,7 @@ export async function GET(req: Request) {
       if (triggerInfo) {
         events.push(resolveBellTrade(
           bars, i, triggerInfo, ttlBars, rr, vwapWindow, maxBarsToResolve,
-          confirmBars, requireOiKeepDropping, slBufferPct, pumpLookback, slLookback
+          confirmBars, requireOiKeepDropping, slBufferPct, pumpLookback, slLookback, slAtOiPeak
         ))
         lastTriggerIdx = i
       }
@@ -333,7 +349,7 @@ export async function GET(req: Request) {
       timeframe: tf,
       paramsUsed: {
         pumpLookback, impulseAtrMult, oiRiseMinPct, oiDropFromPeakMinPct,
-        maxPeakOffsetBars, slLookback, requireOiKeepDropping, rr, ttlBars, confirmBars, vwapWindow,
+        maxPeakOffsetBars, slLookback, slAtOiPeak, requireOiKeepDropping, rr, ttlBars, confirmBars, vwapWindow,
         maxBarsToResolve, cooldownBars,
       },
       totalBars: bars.length,
