@@ -146,7 +146,6 @@ function validateSetup(
   searchFloor: number,
   maxPeakOffsetBars: number,
   oiRiseMinPct: number,
-  oiSpikeMinPct: number,
   oiDropFromPeakMinPct: number,
   impulseAtrMult: number,
   vwapWindow: number
@@ -181,19 +180,6 @@ function validateSetup(
   }
   if (!hasSuddenJump) return null
 
-  // 2b. NOUVEAU : sursaut bougie par bougie — au moins UNE bougie du
-  // segment doit montrer une hausse d'OI ≥ oiSpikeMinPct par rapport
-  // à la clôture d'OI de la bougie précédente. Différent du critère
-  // cumulé ci-dessus : ça détecte un VRAI sursaut ponctuel, pas une
-  // lente accumulation qui finit par dépasser le seuil.
-  let maxSingleBarRisePct = 0
-  for (let k = riseStartIdx + 1; k <= peakIdx; k++) {
-    if (bars[k - 1].oi > 0) {
-      const pct = ((bars[k].oi - bars[k - 1].oi) / bars[k - 1].oi) * 100
-      if (pct > maxSingleBarRisePct) maxSingleBarRisePct = pct
-    }
-  }
-  if (maxSingleBarRisePct < oiSpikeMinPct) return null
 
   // 3. Mouvement de prix "contraint" sur ce même segment dynamique
   // (ATR-prix pour l'instant — voir réserve en en-tête).
