@@ -7,23 +7,32 @@ export const dynamic = 'force-dynamic'
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '/data'
 
 // ───────────────────────────────────────────────────────────────────
-// HYPOTHÈSE TESTÉE ICI : forme en cloche de l'OI — IDENTIQUE dans les
-// deux sens, parce que l'OI ne distingue pas long/short.
+// V2 — RESTRUCTURATION COMPLÈTE DE LA LOGIQUE DE TRIGGER
+// ───────────────────────────────────────────────────────────────────
+// Avant (v1) : on détectait un "trigger" (impulsion + pic OI) PUIS on
+// attendait séparément un croisement VWAP comme confirmation.
 //
-//   Phase 1 (FOMO)            : OI MONTE (positions qui s'ouvrent,
-//                                que ce soit des longs sur un pump
-//                                ou des shorts sur un dump)
-//   Phase 2 (haut/bas du move): OI redescend déjà au moment du trigger
-//   Phase 3 (retour vers VWAP): OI continue de baisser pendant la
-//                                confirmation (vérifié en plus du
-//                                croisement VWAP existant)
+// Maintenant (v2) : le VRAI déclencheur EST le croisement de la VWAP.
+// On scanne chaque bougie ; dès que le prix vient de croiser la VWAP,
+// on remonte le temps pour VALIDER que ce croisement correspond à un
+// vrai setup (pic d'OI récent, chute suffisante, mouvement de prix
+// significatif, pic du bon côté de sa propre VWAP). Si validé, on
+// exige confirmBars bougies consécutives du bon côté avant d'entrer.
 //
-// Le sens du PRIX (up/down) détermine seulement SELL vs BUY et le
-// sens de la confirmation VWAP — la FORME de l'OI recherchée (pic,
-// pas creux) est la même dans les deux cas.
+// pumpLookback n'est plus une fenêtre de MESURE — juste un garde-fou
+// qui borne jusqu'où les recherches rétroactives (pic OI, début de
+// la montée d'OI) sont autorisées à remonter.
 //
-// Différent du détecteur actuel (squeeze/route.ts) qui ne regarde
-// que le solde net OI(fin) - OI(début) sur 5 bougies, sans forme.
+// ⚠️ POINTS OUVERTS, PAS ENCORE TRANCHÉS :
+// - Le filtre d'impulsion utilise toujours l'ATR du PRIX, pas une
+//   mesure de volatilité de l'OI lui-même (voir échange du
+//   29/06/2026 — à décider si on remplace).
+// - Confirmation sur H1 uniquement — pas de données M15 disponibles
+//   dans cette session pour une confirmation plus fine.
+// - maxBarsToResolve retiré : chaque trade va jusqu'au SL ou au TP,
+//   peu importe le temps que ça prend (garde-fou de sécurité à 1000
+//   bougies pour éviter une boucle infinie en cas de données
+//   pathologiques — étiqueté "unresolved", pas "breakeven").
 // ───────────────────────────────────────────────────────────────────
 
 type RawBar = {
@@ -37,26 +46,27 @@ type RawBar = {
   fundingRate: number
 }
 
-type SqueezeDirection = 'up' | 'down'
-type SqueezeOutcome = 'win' | 'loss' | 'breakeven' | 'no_confirmation'
+type Direction = 'up' | 'down' // 'up' = pump puis SELL, 'down' = dump puis BUY
+type Outcome = 'win' | 'loss' | 'unresolved' | 'no_confirmation'
 
-type BellEvent = {
-  triggerTime: number
-  direction: SqueezeDirection
+type TradeEvent = {
+  crossTime: number
+  direction: Direction
+  peakOiTime: number
+  peakOffsetBars: number
+  oiRiseToPeakPct: number
+  oiDropFromPeakPct: number
+  peakOnFomoSide: boolean // pic au-dessus (up) ou sous (down) de sa propre VWAP
   priceMovePct: number
-  oiRiseToPeakPct: number   // phase 1 : montée FOMO mesurée
-  oiDropFromPeakPct: number // phase 2 : redescente déjà entamée au trigger
-  peakOffsetBars: number    // combien de bougies avant le trigger le pic d'OI a eu lieu
   confirmed: boolean
   barsToConfirm?: number
   action?: 'BUY' | 'SELL'
   entryPrice?: number
   slPrice?: number
   tpPrice?: number
-  outcome: SqueezeOutcome
+  outcome: Outcome
   rMultiple: number
   barsToClose?: number
-  oiKeptDroppingDuringConfirm?: boolean // phase 3 vérifiée ou non
 }
 
 type StatBlock = { trades: number; wins: number; winRate: number; avgR: number; expectancy: number }
@@ -88,203 +98,92 @@ function computeVWAPAt(bars: RawBar[], i: number, vwapWindow: number): number {
   return vol > 0 ? pv / vol : bars[i].close
 }
 
-// ─── DÉTECTION DE LA FORME EN CLOCHE ─────────────────────────────
-// Regarde une fenêtre de `pumpLookback` bougies avant le trigger.
-// Trouve le pic d'OI dans cette fenêtre, vérifie qu'il a bien monté
-// depuis le début de fenêtre (phase 1), et qu'il a déjà redescendu
-// d'au moins X% jusqu'à la bougie de trigger (phase 2 amorcée).
-function detectBellShapeAt(
+// ─── RECHERCHES RÉTROACTIVES (toutes bornées par searchFloor) ────
+
+// Dernier pic d'OI en reculant depuis fromIdx (s'arrête au premier
+// retournement — pas le maximum global de la fenêtre).
+function findRecentOiPeak(bars: RawBar[], fromIdx: number, searchFloor: number): number {
+  let peakIdx = fromIdx
+  let peakOi = bars[fromIdx].oi
+  for (let k = fromIdx - 1; k >= searchFloor; k--) {
+    if (bars[k].oi > peakOi) { peakOi = bars[k].oi; peakIdx = k } else break
+  }
+  return peakIdx
+}
+
+// Vrai début de la montée d'OI : le creux d'OI le plus récent avant
+// le pic (symétrique de findRecentOiPeak, mais cherche un minimum).
+function findOiRiseStart(bars: RawBar[], peakIdx: number, searchFloor: number): number {
+  let startIdx = peakIdx
+  let minOi = bars[peakIdx].oi
+  for (let k = peakIdx - 1; k >= searchFloor; k--) {
+    if (bars[k].oi < minOi) { minOi = bars[k].oi; startIdx = k } else break
+  }
+  return startIdx
+}
+
+// Vrai extrême de PRIX entre deux indices (pour le SL).
+function priceExtreme(bars: RawBar[], fromIdx: number, toIdx: number, kind: 'high' | 'low'): number {
+  const slice = bars.slice(Math.min(fromIdx, toIdx), Math.max(fromIdx, toIdx) + 1)
+  return kind === 'high' ? Math.max(...slice.map(b => b.high)) : Math.min(...slice.map(b => b.low))
+}
+
+type SetupValidation = {
+  peakIdx: number
+  riseStartIdx: number
+  peakOffsetBars: number
+  oiRiseToPeakPct: number
+  oiDropFromPeakPct: number
+  priceMovePct: number
+  peakOnFomoSide: boolean
+}
+
+function validateSetup(
   bars: RawBar[],
   atr: number[],
-  i: number,
-  pumpLookback: number,
-  impulseAtrMult: number,
+  crossIdx: number,
+  direction: Direction,
+  searchFloor: number,
+  maxPeakOffsetBars: number,
   oiRiseMinPct: number,
   oiDropFromPeakMinPct: number,
-  maxPeakOffsetBars: number
-): { direction: SqueezeDirection; priceMovePct: number; oiRiseToPeakPct: number; oiDropFromPeakPct: number; peakOffsetBars: number } | null {
-  const windowStart = i - pumpLookback + 1
-  if (windowStart < 0) return null
+  impulseAtrMult: number,
+  vwapWindow: number
+): SetupValidation | null {
+  // 1. Dernier pic d'OI avant le croisement — doit déjà être en train
+  // de redescendre, et de façon récente (soudaineté).
+  const peakIdx = findRecentOiPeak(bars, crossIdx, searchFloor)
+  if (peakIdx === crossIdx) return null
+  const peakOffsetBars = crossIdx - peakIdx
+  if (peakOffsetBars > maxPeakOffsetBars) return null
 
-  const startBar = bars[windowStart]
-  const endBar = bars[i]
-  const priceMove = endBar.close - startBar.close
-  const direction: SqueezeDirection = priceMove > 0 ? 'up' : 'down'
-  const priceMovePct = (priceMove / startBar.close) * 100
-
-  // Magnitude de l'impulsion (même logique que le moteur existant,
-  // sur toute la fenêtre pump plutôt que les 5 dernières bougies).
-  if (Math.abs(priceMove) <= impulseAtrMult * atr[i]) return null
-
-  if (!startBar.oi || startBar.oi <= 0) return null
-
-  // Trouver le DERNIER pic d'OI en reculant depuis la bougie de
-  // trigger — pas le maximum global de toute la fenêtre. On part
-  // du trigger et on recule jusqu'à ce que l'OI cesse d'augmenter
-  // en remontant dans le temps : c'est le pic le plus récent, celui
-  // qui précède directement la chute qui amène au trigger. S'il y
-  // avait une bosse plus ancienne et plus haute dans la fenêtre,
-  // elle est ignorée — elle n'est pas pertinente pour CE trigger.
-  let peakIdx = i
-  let peakOi = bars[i].oi
-  for (let k = i - 1; k >= windowStart; k--) {
-    if (bars[k].oi > peakOi) {
-      peakOi = bars[k].oi
-      peakIdx = k
-    } else {
-      break // l'OI a cessé d'augmenter en remontant — vrai pic trouvé
-    }
-  }
-
-  // Le pic ne doit pas être la dernière bougie — il faut qu'il y ait
-  // déjà une redescente amorcée au moment du trigger (phase 2).
-  if (peakIdx === i) return null
-
-  // Soudaineté du dump : le pic d'OI doit être à maxPeakOffsetBars
-  // bougies maximum du trigger.
-  if (i - peakIdx > maxPeakOffsetBars) return null
-
-  const oiRiseToPeakPct = ((peakOi - startBar.oi) / startBar.oi) * 100
-  if (oiRiseToPeakPct < oiRiseMinPct) return null
-
-  const oiDropFromPeakPct = ((peakOi - endBar.oi) / peakOi) * 100
+  const peakOi = bars[peakIdx].oi
+  const oiDropFromPeakPct = ((peakOi - bars[crossIdx].oi) / peakOi) * 100
   if (oiDropFromPeakPct < oiDropFromPeakMinPct) return null
 
-  return {
-    direction,
-    priceMovePct,
-    oiRiseToPeakPct: Math.round(oiRiseToPeakPct * 100) / 100,
-    oiDropFromPeakPct: Math.round(oiDropFromPeakPct * 100) / 100,
-    peakOffsetBars: i - peakIdx,
-  }
+  // 2. Vrai début de la montée d'OI — pas une fenêtre fixe.
+  const riseStartIdx = findOiRiseStart(bars, peakIdx, searchFloor)
+  if (!bars[riseStartIdx].oi || bars[riseStartIdx].oi <= 0) return null
+  const oiRiseToPeakPct = ((peakOi - bars[riseStartIdx].oi) / bars[riseStartIdx].oi) * 100
+  if (oiRiseToPeakPct < oiRiseMinPct) return null
+
+  // 3. Mouvement de prix "contraint" sur ce même segment dynamique
+  // (ATR-prix pour l'instant — voir réserve en en-tête).
+  const priceMove = bars[peakIdx].close - bars[riseStartIdx].close
+  const priceMovePct = (priceMove / bars[riseStartIdx].close) * 100
+  if (Math.abs(priceMove) <= impulseAtrMult * atr[peakIdx]) return null
+
+  // 4. Le pic devait être du bon côté de SA PROPRE vwap — une vraie
+  // extension, pas une fluctuation de bruit autour de la moyenne.
+  const vwapAtPeak = computeVWAPAt(bars, peakIdx, vwapWindow)
+  const peakAboveVwap = bars[peakIdx].close > vwapAtPeak
+  const peakOnFomoSide = direction === 'up' ? peakAboveVwap : !peakAboveVwap
+  if (!peakOnFomoSide) return null
+
+  return { peakIdx, riseStartIdx, peakOffsetBars, oiRiseToPeakPct, oiDropFromPeakPct, priceMovePct, peakOnFomoSide }
 }
 
-function resolveBellTrade(
-  bars: RawBar[],
-  triggerIdx: number,
-  triggerInfo: { direction: SqueezeDirection; priceMovePct: number; oiRiseToPeakPct: number; oiDropFromPeakPct: number; peakOffsetBars: number },
-  ttlBars: number,
-  rr: number,
-  vwapWindow: number,
-  maxBarsToResolve: number,
-  confirmBars: number,
-  requireOiKeepDropping: boolean,
-  slBufferPct: number,
-  pumpLookback: number,
-  slLookback: number,
-  slAtOiPeak: boolean
-): BellEvent {
-  let windowHigh: number
-  let windowLow: number
-
-  if (slAtOiPeak) {
-    // NOUVEAU : au lieu d'une fenêtre fixe arbitraire, on DÉTECTE
-    // le vrai point de départ du mouvement — on recule depuis le
-    // pic d'OI jusqu'au véritable swing low/high (le moment où le
-    // prix cesse de s'étendre dans le sens du mouvement). S'adapte
-    // naturellement à la durée réelle du move (1h, 2h, 4h...) au
-    // lieu d'imposer un nombre de bougies deviné à l'avance.
-    const peakIdx = triggerIdx - triggerInfo.peakOffsetBars
-    const searchFloor = triggerIdx - pumpLookback + 1 // garde-fou contre une remontée sans fin
-    const direction = triggerInfo.direction
-
-    let extremeIdx = peakIdx
-    let extremeVal = direction === 'up' ? bars[peakIdx].low : bars[peakIdx].high
-    for (let k = peakIdx - 1; k >= searchFloor; k--) {
-      const val = direction === 'up' ? bars[k].low : bars[k].high
-      const better = direction === 'up' ? val < extremeVal : val > extremeVal
-      if (better) {
-        extremeVal = val
-        extremeIdx = k
-      } else {
-        break // le prix a cessé de s'étendre en remontant dans le temps — vrai point de départ trouvé
-      }
-    }
-
-    const setupBars = bars.slice(extremeIdx, peakIdx + 1)
-    windowHigh = Math.max(...setupBars.map(b => b.high))
-    windowLow = Math.min(...setupBars.map(b => b.low))
-  } else {
-    // Comportement existant : fenêtre de prix de slLookback bougies
-    // se terminant au trigger.
-    const slWindowStart = triggerIdx - slLookback + 1
-    const windowBars = bars.slice(slWindowStart, triggerIdx + 1)
-    windowHigh = Math.max(...windowBars.map(b => b.high))
-    windowLow = Math.min(...windowBars.map(b => b.low))
-  }
-
-  const base = {
-    triggerTime: bars[triggerIdx].time,
-    direction: triggerInfo.direction,
-    priceMovePct: Math.round(triggerInfo.priceMovePct * 1000) / 1000,
-    oiRiseToPeakPct: triggerInfo.oiRiseToPeakPct,
-    oiDropFromPeakPct: triggerInfo.oiDropFromPeakPct,
-    peakOffsetBars: triggerInfo.peakOffsetBars,
-  }
-
-  let consecutiveCount = 0
-  let confirmBarIdx = -1
-  let oiAtTrigger = bars[triggerIdx].oi
-
-  for (let j = triggerIdx + 1; j < Math.min(triggerIdx + 1 + ttlBars, bars.length); j++) {
-    const vwapJ = computeVWAPAt(bars, j, vwapWindow)
-    const closeJ = bars[j].close
-    const onOppositeSide = triggerInfo.direction === 'up' ? closeJ < vwapJ : closeJ > vwapJ
-
-    // Phase 3 : pendant l'attente de confirmation, l'OI doit
-    // continuer à baisser — dans les DEUX sens, puisque la forme
-    // recherchée est la même (pic puis chute) peu importe la
-    // direction du prix.
-    if (requireOiKeepDropping) {
-      const stillDropping = bars[j].oi <= oiAtTrigger
-      if (!stillDropping) {
-        return { ...base, confirmed: false, outcome: 'no_confirmation', rMultiple: 0, oiKeptDroppingDuringConfirm: false }
-      }
-      oiAtTrigger = bars[j].oi
-    }
-
-    if (onOppositeSide) {
-      consecutiveCount++
-      if (consecutiveCount >= confirmBars) { confirmBarIdx = j; break }
-    } else {
-      consecutiveCount = 0
-    }
-  }
-
-  if (confirmBarIdx === -1) {
-    return { ...base, confirmed: false, outcome: 'no_confirmation', rMultiple: 0, oiKeptDroppingDuringConfirm: requireOiKeepDropping }
-  }
-
-  const action: 'BUY' | 'SELL' = triggerInfo.direction === 'up' ? 'SELL' : 'BUY'
-  const entryPrice = bars[confirmBarIdx].close
-  const slPrice = action === 'SELL' ? windowHigh * (1 + slBufferPct) : windowLow * (1 - slBufferPct)
-  const risk = Math.abs(entryPrice - slPrice)
-  const tpPrice = action === 'SELL' ? entryPrice - risk * rr : entryPrice + risk * rr
-
-  let outcome: SqueezeOutcome = 'breakeven'
-  let rMultiple = 0
-  let barsToClose = 0
-
-  for (let j = confirmBarIdx + 1; j < Math.min(confirmBarIdx + 1 + maxBarsToResolve, bars.length); j++) {
-    const b = bars[j]
-    barsToClose = j - confirmBarIdx
-    if (action === 'SELL') {
-      if (b.low <= tpPrice) { outcome = 'win'; rMultiple = rr; break }
-      if (b.high >= slPrice) { outcome = 'loss'; rMultiple = -1; break }
-    } else {
-      if (b.high >= tpPrice) { outcome = 'win'; rMultiple = rr; break }
-      if (b.low <= slPrice) { outcome = 'loss'; rMultiple = -1; break }
-    }
-  }
-
-  return {
-    ...base, confirmed: true, barsToConfirm: confirmBarIdx - triggerIdx, action,
-    entryPrice, slPrice, tpPrice, outcome, rMultiple, barsToClose,
-    oiKeptDroppingDuringConfirm: requireOiKeepDropping,
-  }
-}
-
-function calcStats(events: BellEvent[]): StatBlock {
+function calcStats(events: TradeEvent[]): StatBlock {
   const closed = events.filter(e => e.outcome === 'win' || e.outcome === 'loss')
   const wins = closed.filter(e => e.outcome === 'win')
   const winRate = closed.length > 0 ? wins.length / closed.length : 0
@@ -302,34 +201,22 @@ export async function GET(req: Request) {
   const symbol = (url.searchParams.get('symbol') ?? 'BTCUSDT').toUpperCase()
   const tf = url.searchParams.get('tf') ?? '1h'
 
-  // Fenêtre de recherche du pic d'OI — plus large que les 5 bougies
-  // du détecteur actuel, puisqu'on cherche une forme, pas juste un
-  // solde net sur une courte fenêtre.
-  const pumpLookback = Number(url.searchParams.get('pumpLookback') ?? 12)
+  const pumpLookback = Number(url.searchParams.get('pumpLookback') ?? 12) // garde-fou, plus une fenêtre de mesure
   const impulseAtrMult = Number(url.searchParams.get('atrMult') ?? 1.0)
   const oiRiseMinPct = Number(url.searchParams.get('oiRiseMin') ?? 2)
   const oiDropFromPeakMinPct = Number(url.searchParams.get('oiDropFromPeakMin') ?? 0.5)
-  // Soudaineté du dump : le pic d'OI doit être à maxPeakOffsetBars
-  // bougies maximum du trigger. Défaut=2 pour exiger un dump "d'un
-  // coup" comme décrit (pic puis chute quasi immédiate), au lieu de
-  // la valeur précédente qui acceptait jusqu'à 10 bougies d'écart.
   const maxPeakOffsetBars = Number(url.searchParams.get('maxPeakOffsetBars') ?? 2)
-  // Fenêtre dédiée pour le calcul du SL/TP — par défaut égale à
-  // pumpLookback (comportement d'avant), mais testable séparément
-  // pour éviter un stop placé sur l'amplitude du mouvement entier.
-  const slLookback = Number(url.searchParams.get('slLookback') ?? pumpLookback)
-  // NOUVEAU : si true, le SL s'ancre sur la bougie du pic d'OI
-  // plutôt que sur une fenêtre de prix (slLookback est alors ignoré).
-  const slAtOiPeak = url.searchParams.get('slAtOiPeak') === 'true'
-  const requireOiKeepDropping = url.searchParams.get('requireOiKeepDropping') === 'true'
   const rr = Number(url.searchParams.get('rr') ?? 1.5)
   const ttlBars = Number(url.searchParams.get('ttl') ?? 8)
   const confirmBars = Number(url.searchParams.get('confirmBars') ?? 2)
-  const vwapWindow = Number(url.searchParams.get('vwapWindow') ?? 50)
-  const maxBarsToResolve = Number(url.searchParams.get('maxBarsToResolve') ?? 16)
+  const vwapWindow = Number(url.searchParams.get('vwapWindow') ?? 12)
+  const cooldownBars = Number(url.searchParams.get('cooldown') ?? 12)
   const slBufferPct = 0.002
   const atrPeriod = 14
-  const cooldownBars = Number(url.searchParams.get('cooldown') ?? 12)
+  // Garde-fou de sécurité seulement (pas une vraie limite business) —
+  // évite une boucle qui ne se termine jamais sur des données
+  // pathologiques. Le trade va normalement jusqu'au SL ou au TP.
+  const maxResolveSafety = Number(url.searchParams.get('maxResolveSafety') ?? 1000)
 
   const allowed = ['BTCUSDT', 'ETHUSDT', 'XRPUSDT', 'SOLUSDT']
   if (!allowed.includes(symbol)) {
@@ -348,19 +235,91 @@ export async function GET(req: Request) {
     const bars: RawBar[] = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'))
     const atr = computeATR(bars, atrPeriod)
 
-    const events: BellEvent[] = []
+    const events: TradeEvent[] = []
     let lastTriggerIdx = -Infinity
+    const startIdx = pumpLookback + atrPeriod + vwapWindow
 
-    for (let i = pumpLookback + atrPeriod; i < bars.length - ttlBars - maxBarsToResolve; i++) {
+    for (let i = startIdx; i < bars.length - 1; i++) {
       if (i - lastTriggerIdx < cooldownBars) continue
-      const triggerInfo = detectBellShapeAt(bars, atr, i, pumpLookback, impulseAtrMult, oiRiseMinPct, oiDropFromPeakMinPct, maxPeakOffsetBars)
-      if (triggerInfo) {
-        events.push(resolveBellTrade(
-          bars, i, triggerInfo, ttlBars, rr, vwapWindow, maxBarsToResolve,
-          confirmBars, requireOiKeepDropping, slBufferPct, pumpLookback, slLookback, slAtOiPeak
-        ))
-        lastTriggerIdx = i
+
+      const vwapPrev = computeVWAPAt(bars, i - 1, vwapWindow)
+      const vwapCurr = computeVWAPAt(bars, i, vwapWindow)
+
+      const crossedDown = bars[i - 1].close >= vwapPrev && bars[i].close < vwapCurr // candidat SELL
+      const crossedUp = bars[i - 1].close <= vwapPrev && bars[i].close > vwapCurr   // candidat BUY
+      if (!crossedDown && !crossedUp) continue
+
+      const direction: Direction = crossedDown ? 'up' : 'down'
+      const searchFloor = Math.max(0, i - pumpLookback + 1)
+
+      const setup = validateSetup(
+        bars, atr, i, direction, searchFloor,
+        maxPeakOffsetBars, oiRiseMinPct, oiDropFromPeakMinPct, impulseAtrMult, vwapWindow
+      )
+      if (!setup) continue
+
+      lastTriggerIdx = i // cooldown démarre dès la détection validée
+
+      const base = {
+        crossTime: bars[i].time,
+        direction,
+        peakOiTime: bars[setup.peakIdx].time,
+        peakOffsetBars: setup.peakOffsetBars,
+        oiRiseToPeakPct: Math.round(setup.oiRiseToPeakPct * 100) / 100,
+        oiDropFromPeakPct: Math.round(setup.oiDropFromPeakPct * 100) / 100,
+        peakOnFomoSide: setup.peakOnFomoSide,
+        priceMovePct: Math.round(setup.priceMovePct * 1000) / 1000,
       }
+
+      // Confirmation : confirmBars bougies consécutives du bon côté
+      // de la vwap, à partir du croisement (plusieurs essais possibles
+      // dans la fenêtre ttlBars si le prix repasse temporairement).
+      let consecutive = 0
+      let confirmIdx = -1
+      for (let j = i; j < Math.min(i + ttlBars, bars.length); j++) {
+        const vwapJ = computeVWAPAt(bars, j, vwapWindow)
+        const onRightSide = direction === 'up' ? bars[j].close < vwapJ : bars[j].close > vwapJ
+        if (onRightSide) {
+          consecutive++
+          if (consecutive >= confirmBars) { confirmIdx = j; break }
+        } else {
+          consecutive = 0
+        }
+      }
+
+      if (confirmIdx === -1) {
+        events.push({ ...base, confirmed: false, outcome: 'no_confirmation', rMultiple: 0 })
+        continue
+      }
+
+      const action: 'BUY' | 'SELL' = direction === 'up' ? 'SELL' : 'BUY'
+      const entryPrice = bars[confirmIdx].close
+      const slRaw = action === 'SELL'
+        ? priceExtreme(bars, setup.riseStartIdx, setup.peakIdx, 'high')
+        : priceExtreme(bars, setup.riseStartIdx, setup.peakIdx, 'low')
+      const slPrice = action === 'SELL' ? slRaw * (1 + slBufferPct) : slRaw * (1 - slBufferPct)
+      const risk = Math.abs(entryPrice - slPrice)
+      const tpPrice = action === 'SELL' ? entryPrice - risk * rr : entryPrice + risk * rr
+
+      let outcome: Outcome = 'unresolved'
+      let rMultiple = 0
+      let barsToClose = 0
+      for (let j = confirmIdx + 1; j < Math.min(confirmIdx + 1 + maxResolveSafety, bars.length); j++) {
+        const b = bars[j]
+        barsToClose = j - confirmIdx
+        if (action === 'SELL') {
+          if (b.low <= tpPrice) { outcome = 'win'; rMultiple = rr; break }
+          if (b.high >= slPrice) { outcome = 'loss'; rMultiple = -1; break }
+        } else {
+          if (b.high >= tpPrice) { outcome = 'win'; rMultiple = rr; break }
+          if (b.low <= slPrice) { outcome = 'loss'; rMultiple = -1; break }
+        }
+      }
+
+      events.push({
+        ...base, confirmed: true, barsToConfirm: confirmIdx - i, action,
+        entryPrice, slPrice, tpPrice, outcome, rMultiple, barsToClose,
+      })
     }
 
     const confirmedEvents = events.filter(e => e.confirmed)
@@ -373,11 +332,10 @@ export async function GET(req: Request) {
       timeframe: tf,
       paramsUsed: {
         pumpLookback, impulseAtrMult, oiRiseMinPct, oiDropFromPeakMinPct,
-        maxPeakOffsetBars, slLookback, slAtOiPeak, requireOiKeepDropping, rr, ttlBars, confirmBars, vwapWindow,
-        maxBarsToResolve, cooldownBars,
+        maxPeakOffsetBars, rr, ttlBars, confirmBars, vwapWindow, cooldownBars, maxResolveSafety,
       },
       totalBars: bars.length,
-      totalTriggers: events.length,
+      totalCrossings: events.length,
       totalConfirmed: confirmedEvents.length,
       confirmationRatePct: events.length > 0 ? Math.round((confirmedEvents.length / events.length) * 1000) / 10 : 0,
       overall: calcStats(events),
@@ -388,7 +346,7 @@ export async function GET(req: Request) {
       events: events.slice(-300),
     })
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Erreur backtest bell-shape'
+    const message = error instanceof Error ? error.message : 'Erreur backtest v2'
     return NextResponse.json({ error: message }, { status: 500 })
   }
 }
