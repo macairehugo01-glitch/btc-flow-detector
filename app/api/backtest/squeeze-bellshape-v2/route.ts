@@ -49,9 +49,74 @@ type RawBar = {
 type Direction = 'up' | 'down' // 'up' = pump puis SELL, 'down' = dump puis BUY
 type Outcome = 'win' | 'loss' | 'unresolved' | 'no_confirmation'
 
+// ─── RÉGIME DOW DAILY — porté à l'identique depuis cvd/route.ts (le
+// détecteur squeeze original en production). Même algorithme, mêmes
+// seuils (swingLookback=20), pour que la comparaison v1/v2 soit propre.
+
+type DailyBar = { time: number; high: number; low: number }
+type TrendRegime = 'up' | 'down' | 'undefined'
+type SwingPoint = { idx: number; price: number; confirmedAt: number }
+
+function computeSwingPoints(bars: DailyBar[], lookback: number): { highs: SwingPoint[]; lows: SwingPoint[] } {
+  const highs: SwingPoint[] = []
+  const lows: SwingPoint[] = []
+  for (let i = lookback; i < bars.length - lookback; i++) {
+    const windowBars = bars.slice(i - lookback, i + lookback + 1)
+    const maxHigh = Math.max(...windowBars.map(b => b.high))
+    const minLow = Math.min(...windowBars.map(b => b.low))
+    if (bars[i].high === maxHigh) highs.push({ idx: i, price: bars[i].high, confirmedAt: i + lookback })
+    if (bars[i].low === minLow) lows.push({ idx: i, price: bars[i].low, confirmedAt: i + lookback })
+  }
+  return { highs, lows }
+}
+
+function computeDowTrendLabels(bars: DailyBar[], highs: SwingPoint[], lows: SwingPoint[]): TrendRegime[] {
+  const labels: TrendRegime[] = new Array(bars.length).fill('undefined')
+  type SwingEvent = { confirmedAt: number; type: 'high' | 'low'; point: SwingPoint }
+  const events: SwingEvent[] = [
+    ...highs.map(h => ({ confirmedAt: h.confirmedAt, type: 'high' as const, point: h })),
+    ...lows.map(l => ({ confirmedAt: l.confirmedAt, type: 'low' as const, point: l })),
+  ].sort((a, b) => a.confirmedAt - b.confirmedAt)
+
+  let lastHigh: SwingPoint | null = null, prevHigh: SwingPoint | null = null
+  let lastLow: SwingPoint | null = null, prevLow: SwingPoint | null = null
+  let currentTrend: TrendRegime = 'undefined'
+  let filledUpTo = 0
+
+  for (const ev of events) {
+    const fillEnd = Math.min(ev.confirmedAt, bars.length)
+    for (let i = filledUpTo; i < fillEnd; i++) labels[i] = currentTrend
+    filledUpTo = fillEnd
+    if (ev.type === 'high') { prevHigh = lastHigh; lastHigh = ev.point } else { prevLow = lastLow; lastLow = ev.point }
+    if (lastHigh && prevHigh && lastLow && prevLow) {
+      const higherHigh = lastHigh.price > prevHigh.price
+      const higherLow = lastLow.price > prevLow.price
+      const lowerHigh = lastHigh.price < prevHigh.price
+      const lowerLow = lastLow.price < prevLow.price
+      if (higherHigh && higherLow) currentTrend = 'up'
+      else if (lowerHigh && lowerLow) currentTrend = 'down'
+      // signal mixte → la tendance en cours continue, inchangée
+    }
+  }
+  for (let i = filledUpTo; i < bars.length; i++) labels[i] = currentTrend
+  return labels
+}
+
+function regimeTrendAtTime(dailyBars: DailyBar[], dailyTrendLabels: TrendRegime[], time: number): TrendRegime {
+  let lo = 0, hi = dailyBars.length - 1, ans = -1
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (dailyBars[mid].time <= time) { ans = mid; lo = mid + 1 } else { hi = mid - 1 }
+  }
+  return ans === -1 ? 'undefined' : dailyTrendLabels[ans]
+}
+
+const SWING_LOOKBACK_DAILY = 20 // identique à cvd/route.ts
+
 type TradeEvent = {
   crossTime: number
   direction: Direction
+  dailyRegime: TrendRegime
   peakOiTime: number
   peakOffsetBars: number
   oiRiseToPeakPct: number
@@ -288,6 +353,21 @@ export async function GET(req: Request) {
     )
   }
 
+  const DAILY_FILE = path.join(DATA_DIR, `backtest-history-${symbol.toLowerCase()}-1d.json`)
+  let dailyBars: DailyBar[] = []
+  let dailyTrendLabels: TrendRegime[] = []
+  if (fs.existsSync(DAILY_FILE)) {
+    const dailyRaw: RawBar[] = JSON.parse(fs.readFileSync(DAILY_FILE, 'utf-8'))
+    dailyBars = dailyRaw.map(b => ({ time: b.time, high: b.high, low: b.low }))
+    const { highs, lows } = computeSwingPoints(dailyBars, SWING_LOOKBACK_DAILY)
+    dailyTrendLabels = computeDowTrendLabels(dailyBars, highs, lows)
+  } else {
+    return NextResponse.json(
+      { error: `Données daily manquantes pour appliquer le filtre de régime. Lance /api/backtest/collect?symbol=${symbol}&tf=1d d'abord.` },
+      { status: 400 }
+    )
+  }
+
   try {
     const bars: RawBar[] = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'))
     const atr = computeATR(bars, atrPeriod)
@@ -315,11 +395,28 @@ export async function GET(req: Request) {
       )
       if (!setup) continue
 
-      lastTriggerIdx = i // cooldown démarre dès la détection validée
+      // Le cooldown démarre dès la détection validée, QUE le trade passe
+      // ou non le filtre de régime ensuite — comportement identique au
+      // détecteur squeeze original ("le cooldown démarre dès la
+      // détection, qu'elle soit filtrée par le régime ou non").
+      lastTriggerIdx = i
+
+      if (dailyBars.length > 0) {
+        const trend = regimeTrendAtTime(dailyBars, dailyTrendLabels, bars[i].time)
+        // Identique à cvd/route.ts : UP→SELL exige trend==='up'.
+        // DOWN→BUY n'est jamais filtré par le régime (comme XRP en
+        // production) — aucune option pour changer ce comportement.
+        if (direction === 'up' && trend !== 'up') continue
+      }
+
+      const dailyRegimeAtCross = dailyBars.length > 0
+        ? regimeTrendAtTime(dailyBars, dailyTrendLabels, bars[i].time)
+        : 'undefined'
 
       const base = {
         crossTime: bars[i].time,
         direction,
+        dailyRegime: dailyRegimeAtCross,
         peakOiTime: bars[setup.peakIdx].time,
         peakOffsetBars: setup.peakOffsetBars,
         oiRiseToPeakPct: Math.round(setup.oiRiseToPeakPct * 100) / 100,
@@ -390,6 +487,7 @@ export async function GET(req: Request) {
       paramsUsed: {
         pumpLookback, impulseAtrMult, oiRiseMinPct, oiDropFromPeakMinPct,
         maxPeakOffsetBars, rr, ttlBars, confirmBars, vwapWindow, cooldownBars, maxResolveSafety,
+        dailyDataAvailable: dailyBars.length > 0,
       },
       totalBars: bars.length,
       totalCrossings: events.length,
