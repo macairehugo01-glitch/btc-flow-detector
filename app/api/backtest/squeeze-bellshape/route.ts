@@ -118,17 +118,22 @@ function detectBellShapeAt(
 
   if (!startBar.oi || startBar.oi <= 0) return null
 
-  // Trouver le pic d'OI dans la fenêtre — TOUJOURS un maximum, peu
-  // importe la direction du prix. L'OI ne distingue pas long/short :
-  // un "fake pump" (FOMO de nouveaux longs) et un "fake dump" (FOMO
-  // de nouveaux shorts) produisent tous les deux la même forme —
-  // OI qui monte (positions qui s'ouvrent) puis qui descend
-  // (positions qui se ferment en panique/liquidation), peu importe
-  // le sens du prix.
-  let peakIdx = windowStart
-  let peakOi = bars[windowStart].oi
-  for (let k = windowStart; k <= i; k++) {
-    if (bars[k].oi > peakOi) { peakOi = bars[k].oi; peakIdx = k }
+  // Trouver le DERNIER pic d'OI en reculant depuis la bougie de
+  // trigger — pas le maximum global de toute la fenêtre. On part
+  // du trigger et on recule jusqu'à ce que l'OI cesse d'augmenter
+  // en remontant dans le temps : c'est le pic le plus récent, celui
+  // qui précède directement la chute qui amène au trigger. S'il y
+  // avait une bosse plus ancienne et plus haute dans la fenêtre,
+  // elle est ignorée — elle n'est pas pertinente pour CE trigger.
+  let peakIdx = i
+  let peakOi = bars[i].oi
+  for (let k = i - 1; k >= windowStart; k--) {
+    if (bars[k].oi > peakOi) {
+      peakOi = bars[k].oi
+      peakIdx = k
+    } else {
+      break // l'OI a cessé d'augmenter en remontant — vrai pic trouvé
+    }
   }
 
   // Le pic ne doit pas être la dernière bougie — il faut qu'il y ait
@@ -173,13 +178,32 @@ function resolveBellTrade(
   let windowLow: number
 
   if (slAtOiPeak) {
-    // NOUVEAU : le SL s'ancre sur la bougie EXACTE où l'OI a atteint
-    // son pic — le moment du climax FOMO — plutôt que sur une
-    // fenêtre de prix arbitraire. peakIdx se déduit de
-    // peakOffsetBars (déjà calculé lors de la détection).
+    // NOUVEAU : au lieu d'une fenêtre fixe arbitraire, on DÉTECTE
+    // le vrai point de départ du mouvement — on recule depuis le
+    // pic d'OI jusqu'au véritable swing low/high (le moment où le
+    // prix cesse de s'étendre dans le sens du mouvement). S'adapte
+    // naturellement à la durée réelle du move (1h, 2h, 4h...) au
+    // lieu d'imposer un nombre de bougies deviné à l'avance.
     const peakIdx = triggerIdx - triggerInfo.peakOffsetBars
-    windowHigh = bars[peakIdx].high
-    windowLow = bars[peakIdx].low
+    const searchFloor = triggerIdx - pumpLookback + 1 // garde-fou contre une remontée sans fin
+    const direction = triggerInfo.direction
+
+    let extremeIdx = peakIdx
+    let extremeVal = direction === 'up' ? bars[peakIdx].low : bars[peakIdx].high
+    for (let k = peakIdx - 1; k >= searchFloor; k--) {
+      const val = direction === 'up' ? bars[k].low : bars[k].high
+      const better = direction === 'up' ? val < extremeVal : val > extremeVal
+      if (better) {
+        extremeVal = val
+        extremeIdx = k
+      } else {
+        break // le prix a cessé de s'étendre en remontant dans le temps — vrai point de départ trouvé
+      }
+    }
+
+    const setupBars = bars.slice(extremeIdx, peakIdx + 1)
+    windowHigh = Math.max(...setupBars.map(b => b.high))
+    windowLow = Math.min(...setupBars.map(b => b.low))
   } else {
     // Comportement existant : fenêtre de prix de slLookback bougies
     // se terminant au trigger.
