@@ -165,10 +165,14 @@ function resolveBellTrade(
   confirmBars: number,
   requireOiKeepDropping: boolean,
   slBufferPct: number,
-  pumpLookback: number
+  pumpLookback: number,
+  slLookback: number
 ): BellEvent {
-  const windowStart = triggerIdx - pumpLookback + 1
-  const windowBars = bars.slice(windowStart, triggerIdx + 1)
+  // Fenêtre SL/TP dédiée, plus courte que pumpLookback — évite de
+  // placer le stop sur l'amplitude de TOUT le mouvement pump quand
+  // celui-ci est déjà bien avancé au moment du trigger.
+  const slWindowStart = triggerIdx - slLookback + 1
+  const windowBars = bars.slice(slWindowStart, triggerIdx + 1)
   const windowHigh = Math.max(...windowBars.map(b => b.high))
   const windowLow = Math.min(...windowBars.map(b => b.low))
 
@@ -273,6 +277,10 @@ export async function GET(req: Request) {
   // coup" comme décrit (pic puis chute quasi immédiate), au lieu de
   // la valeur précédente qui acceptait jusqu'à 10 bougies d'écart.
   const maxPeakOffsetBars = Number(url.searchParams.get('maxPeakOffsetBars') ?? 2)
+  // Fenêtre dédiée pour le calcul du SL/TP — par défaut égale à
+  // pumpLookback (comportement d'avant), mais testable séparément
+  // pour éviter un stop placé sur l'amplitude du mouvement entier.
+  const slLookback = Number(url.searchParams.get('slLookback') ?? pumpLookback)
   const requireOiKeepDropping = url.searchParams.get('requireOiKeepDropping') === 'true'
   const rr = Number(url.searchParams.get('rr') ?? 1.5)
   const ttlBars = Number(url.searchParams.get('ttl') ?? 8)
@@ -309,7 +317,7 @@ export async function GET(req: Request) {
       if (triggerInfo) {
         events.push(resolveBellTrade(
           bars, i, triggerInfo, ttlBars, rr, vwapWindow, maxBarsToResolve,
-          confirmBars, requireOiKeepDropping, slBufferPct, pumpLookback
+          confirmBars, requireOiKeepDropping, slBufferPct, pumpLookback, slLookback
         ))
         lastTriggerIdx = i
       }
@@ -325,7 +333,7 @@ export async function GET(req: Request) {
       timeframe: tf,
       paramsUsed: {
         pumpLookback, impulseAtrMult, oiRiseMinPct, oiDropFromPeakMinPct,
-        maxPeakOffsetBars, requireOiKeepDropping, rr, ttlBars, confirmBars, vwapWindow,
+        maxPeakOffsetBars, slLookback, requireOiKeepDropping, rr, ttlBars, confirmBars, vwapWindow,
         maxBarsToResolve, cooldownBars,
       },
       totalBars: bars.length,
