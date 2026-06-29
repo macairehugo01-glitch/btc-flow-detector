@@ -6,7 +6,35 @@ export const dynamic = 'force-dynamic'
 
 const BYBIT = 'https://api.bybit.com'
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '/data'
-const BARS_PER_CALL = 200
+const KLINE_BARS_PER_CALL = 1000 // max autorisé par Bybit pour /v5/market/kline (200 était inutilement petit)
+const OI_BARS_PER_CALL = 200     // max autorisé par Bybit pour /v5/market/open-interest (reste à 200)
+const MAX_RETRIES = 3
+const RETRY_BASE_DELAY_MS = 1000
+
+// Retry avec backoff exponentiel — évite qu'un seul rate-limit ou
+// hiccup réseau ponctuel coupe silencieusement toute la pagination
+// avant d'avoir atteint targetBars. Retourne null après épuisement
+// des tentatives (et logge la raison, visible dans les logs Railway).
+async function fetchWithRetry(url: string): Promise<any> {
+  let lastError: string | null = null
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(url, { cache: 'no-store' })
+      const data = await res.json()
+      if (data.retCode === 0) return data
+      lastError = `retCode=${data.retCode} retMsg=${data.retMsg ?? 'inconnu'}`
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : 'erreur réseau inconnue'
+    }
+    if (attempt < MAX_RETRIES) {
+      const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt)
+      console.log(`[BACKTEST] Retry ${attempt + 1}/${MAX_RETRIES} après échec (${lastError}), attente ${delay}ms`)
+      await new Promise(r => setTimeout(r, delay))
+    }
+  }
+  console.log(`[BACKTEST] Abandon après ${MAX_RETRIES} tentatives — dernière erreur: ${lastError}`)
+  return null
+}
 
 type RawBar = {
   time: number
@@ -39,14 +67,16 @@ function getHistoryFile(symbol: string, tf: string): string {
 async function fetchKlinesPaginated(symbol: string, interval: string, targetBars: number): Promise<KlineRaw[]> {
   const allBars: KlineRaw[] = []
   let endTime = Date.now()
-  const maxCalls = Math.ceil(targetBars / BARS_PER_CALL)
+  const maxCalls = Math.ceil(targetBars / KLINE_BARS_PER_CALL)
   let callCount = 0
 
   while (allBars.length < targetBars && callCount < maxCalls) {
-    const url = `${BYBIT}/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${BARS_PER_CALL}&end=${endTime}`
-    const res = await fetch(url, { cache: 'no-store' })
-    const data = await res.json()
-    if (data.retCode !== 0 || !data.result?.list?.length) break
+    const url = `${BYBIT}/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=${KLINE_BARS_PER_CALL}&end=${endTime}`
+    const data = await fetchWithRetry(url)
+    if (!data || !data.result?.list?.length) {
+      console.log(`[BACKTEST] Klines ${symbol}: arrêt à ${allBars.length}/${targetBars} bougies (appel ${callCount + 1}/${maxCalls})`)
+      break
+    }
 
     const bars: KlineRaw[] = [...data.result.list].reverse().map((k: string[]) => ({
       time: Math.floor(Number(k[0]) / 1000),
@@ -74,28 +104,28 @@ async function fetchKlinesPaginated(symbol: string, interval: string, targetBars
 async function fetchOIPaginated(symbol: string, oiInterval: string, targetBars: number): Promise<{ time: number; oi: number }[]> {
   const allOI: { time: number; oi: number }[] = []
   let endTime = Date.now()
-  const maxCalls = Math.ceil(targetBars / BARS_PER_CALL)
+  const maxCalls = Math.ceil(targetBars / OI_BARS_PER_CALL)
   let callCount = 0
 
   while (allOI.length < targetBars && callCount < maxCalls) {
-    const url = `${BYBIT}/v5/market/open-interest?category=linear&symbol=${symbol}&intervalTime=${oiInterval}&limit=${BARS_PER_CALL}&endTime=${endTime}`
-    try {
-      const res = await fetch(url, { cache: 'no-store' })
-      const data = await res.json()
-      if (data.retCode !== 0 || !data.result?.list?.length) break
+    const url = `${BYBIT}/v5/market/open-interest?category=linear&symbol=${symbol}&intervalTime=${oiInterval}&limit=${OI_BARS_PER_CALL}&endTime=${endTime}`
+    const data = await fetchWithRetry(url)
+    if (!data || !data.result?.list?.length) {
+      console.log(`[BACKTEST] OI ${symbol}: arrêt à ${allOI.length}/${targetBars} points (appel ${callCount + 1}/${maxCalls})`)
+      break
+    }
 
-      const bars = [...data.result.list].reverse().map((d: { timestamp: string; openInterest: string }) => ({
-        time: Math.floor(Number(d.timestamp) / 1000),
-        oi: Number(d.openInterest),
-      }))
+    const bars = [...data.result.list].reverse().map((d: { timestamp: string; openInterest: string }) => ({
+      time: Math.floor(Number(d.timestamp) / 1000),
+      oi: Number(d.openInterest),
+    }))
 
-      allOI.unshift(...bars)
-      const oldest = bars[0]
-      if (!oldest) break
-      endTime = oldest.time * 1000 - 1
-      callCount++
-      await new Promise(r => setTimeout(r, 250))
-    } catch { break }
+    allOI.unshift(...bars)
+    const oldest = bars[0]
+    if (!oldest) break
+    endTime = oldest.time * 1000 - 1
+    callCount++
+    await new Promise(r => setTimeout(r, 250))
   }
 
   const seen = new Set<number>()
@@ -112,24 +142,21 @@ async function fetchFundingPaginated(symbol: string): Promise<{ time: number; ra
   let callCount = 0
 
   while (callCount < 12) {
-    const url = `${BYBIT}/v5/market/funding/history?category=linear&symbol=${symbol}&limit=${BARS_PER_CALL}&endTime=${endTime}`
-    try {
-      const res = await fetch(url, { cache: 'no-store' })
-      const data = await res.json()
-      if (data.retCode !== 0 || !data.result?.list?.length) break
+    const url = `${BYBIT}/v5/market/funding/history?category=linear&symbol=${symbol}&limit=${OI_BARS_PER_CALL}&endTime=${endTime}`
+    const data = await fetchWithRetry(url)
+    if (!data || !data.result?.list?.length) break
 
-      const bars = [...data.result.list].reverse().map((d: { fundingRateTimestamp: string; fundingRate: string }) => ({
-        time: Math.floor(Number(d.fundingRateTimestamp) / 1000),
-        rate: Number(d.fundingRate),
-      }))
+    const bars = [...data.result.list].reverse().map((d: { fundingRateTimestamp: string; fundingRate: string }) => ({
+      time: Math.floor(Number(d.fundingRateTimestamp) / 1000),
+      rate: Number(d.fundingRate),
+    }))
 
-      allFunding.unshift(...bars)
-      const oldest = bars[0]
-      if (!oldest) break
-      endTime = oldest.time * 1000 - 1
-      callCount++
-      await new Promise(r => setTimeout(r, 250))
-    } catch { break }
+    allFunding.unshift(...bars)
+    const oldest = bars[0]
+    if (!oldest) break
+    endTime = oldest.time * 1000 - 1
+    callCount++
+    await new Promise(r => setTimeout(r, 250))
   }
 
   const seen = new Set<number>()
