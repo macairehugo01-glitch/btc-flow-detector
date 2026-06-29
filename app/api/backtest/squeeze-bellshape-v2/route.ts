@@ -403,10 +403,15 @@ export async function GET(req: Request) {
 
       if (dailyBars.length > 0) {
         const trend = regimeTrendAtTime(dailyBars, dailyTrendLabels, bars[i].time)
-        // Identique à cvd/route.ts : UP→SELL exige trend==='up'.
-        // DOWN→BUY n'est jamais filtré par le régime (comme XRP en
-        // production) — aucune option pour changer ce comportement.
-        if (direction === 'up' && trend !== 'up') continue
+        // NOUVEAU TEST (jamais validé en production sous cette forme) :
+        // filtre symétrique dans les deux sens — on trade dans le sens
+        // de la tendance daily, SELL comme BUY. L'original ne filtrait
+        // que SELL (UP→SELL exigeait trend==='up') ; DOWN→BUY n'était
+        // jamais filtré en prod (XRP seul tradait BUY, et son edge
+        // s'est avéré positif dans les deux régimes — pas de règle
+        // universelle trouvée pour BUY lors de l'analyse exploratoire).
+        const requiredTrend: TrendRegime = direction === 'up' ? 'up' : 'down'
+        if (trend !== requiredTrend) continue
       }
 
       const dailyRegimeAtCross = dailyBars.length > 0
