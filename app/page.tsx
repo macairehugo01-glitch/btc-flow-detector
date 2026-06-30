@@ -14,11 +14,9 @@ import { useMarketData } from '../useMarketData'
 import { useMarketStore } from '../useMarketStore'
 
 // ─────────────────────────────────────────────────────────────────────────
-// PANNEAU V2 — moteur cloche d'OI + VWAP + Dow theory, BTC/ETH/SOL en M15.
-// Volontairement AUTONOME : son propre fetch + state, ne dépend pas de
-// useMarketData/useMarketStore (logique v1, jamais étendue à v2). XRP est
-// absent par design (edge inversé sous ce filtre, voir analyse du
-// 30/06/2026) — ne pas l'ajouter ici sans une analyse dédiée.
+// BLOC V2 — moteur cloche d'OI + VWAP + Dow theory, BTC/ETH/SOL en M15.
+// Autonome : son propre fetch + state, indépendant de useMarketData/
+// useMarketStore (logique v1, jamais étendue à v2). XRP absent par design.
 // ─────────────────────────────────────────────────────────────────────────
 
 type V2SlotSignal = {
@@ -63,7 +61,7 @@ function v2ActionColor(action: string) {
   return '#888'
 }
 
-function V2Panel() {
+function V2Block() {
   const [data, setData] = useState<V2Response | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -86,17 +84,13 @@ function V2Panel() {
   }, [])
 
   return (
-    <div style={{ border: '1px solid var(--bg-border)', borderRadius: 10, padding: 16, background: 'var(--bg-card)' }}>
+    <div style={{ border: '1px solid var(--bg-border)', borderRadius: 10, padding: 16, background: 'var(--bg-card)', height: '100%' }}>
       <div style={{ fontSize: 13, fontWeight: 'bold', marginBottom: 12, color: 'var(--text-primary)' }}>
         Moteur V2 — Cloche d'OI + Dow theory (BTC/ETH/SOL, M15)
       </div>
 
-      {error && (
-        <div style={{ fontSize: 12, color: '#ff4757', marginBottom: 8 }}>⚠ {error}</div>
-      )}
-      {!data && !error && (
-        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Chargement...</div>
-      )}
+      {error && <div style={{ fontSize: 12, color: '#ff4757', marginBottom: 8 }}>⚠ {error}</div>}
+      {!data && !error && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Chargement...</div>}
 
       {data && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -158,6 +152,13 @@ export default function Page() {
         {isReady && (
           <>
             <StatsBar />
+
+            {/* V1 et V2 côte à côte, en haut, pour comparer en un coup d'œil */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+              <TradeSignalPanel />
+              <V2Block />
+            </div>
+
             <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 320px', gap: 16, alignItems: 'start' }}>
               {/* Colonne principale */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -171,14 +172,12 @@ export default function Page() {
               </div>
               {/* Colonne droite */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                <TradeSignalPanel />
                 <OIStatsPanel />
                 <ConditionsChecklist />
                 <SettingsPanel />
-                {/* Nouveau — moteur v2, bloc autonome, voir plus haut */}
-                <V2Panel />
               </div>
             </div>
+
             {/* Liens backtest */}
             <div style={{ display: 'flex', gap: 12, justifyContent: 'center', paddingBottom: 24 }}>
               <a href="/backtest" style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid var(--bg-border)', background: 'var(--bg-card)', color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: 12, textDecoration: 'none' }}>
