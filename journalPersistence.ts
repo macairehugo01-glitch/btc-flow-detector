@@ -201,3 +201,60 @@ export function saveDailyRegimeCache(cache: DailyRegimeCache, symbol: string) {
     fs.writeFileSync(getRegimeCacheFilePath(symbol), JSON.stringify(cache), 'utf-8')
   } catch {}
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// ADDITION À journalPersistence.ts — coller ce bloc à la fin du fichier
+// existant. N'importe et ne modifie rien d'autre dans le fichier.
+// ─────────────────────────────────────────────────────────────────────────
+
+// ─── ÉTAT DU DÉTECTEUR V2 (cloche d'OI + croisement VWAP + régime Dow
+// symétrique) — un fichier par slot, structure différente du squeeze v1
+// car le SL est figé au moment de la détection (swing high/low), pas
+// recalculé à l'entrée.
+
+export type PendingV2Trigger = {
+  crossTime: number
+  direction: 'up' | 'down'
+  // SL figé au moment de la détection initiale (basé sur le swing
+  // high/low entre riseStartIdx et peakIdx) — NE PAS recalculer
+  // pendant l'attente de confirmation, sous peine de désynchroniser
+  // le live du comportement validé en backtest.
+  slPrice: number
+  consecutiveCount: number
+  barsWaited: number
+} | null
+
+export type V2DetectorState = {
+  lastBarTimeProcessed: number
+  lastTriggerTime: number
+  pendingTrigger: PendingV2Trigger
+}
+
+const DEFAULT_V2_STATE: V2DetectorState = {
+  lastBarTimeProcessed: 0,
+  lastTriggerTime: 0,
+  pendingTrigger: null,
+}
+
+function getV2StateFilePath(slot: string): string {
+  return path.join(DATA_DIR, `v2-state-${slot.toLowerCase().replace('-', '_')}.json`)
+}
+
+export function loadV2DetectorState(slot: string): V2DetectorState {
+  try {
+    ensureDir()
+    const filePath = getV2StateFilePath(slot)
+    if (!fs.existsSync(filePath)) return { ...DEFAULT_V2_STATE }
+    const raw = fs.readFileSync(filePath, 'utf-8')
+    return { ...DEFAULT_V2_STATE, ...JSON.parse(raw) }
+  } catch {
+    return { ...DEFAULT_V2_STATE }
+  }
+}
+
+export function saveV2DetectorState(state: V2DetectorState, slot: string) {
+  try {
+    ensureDir()
+    fs.writeFileSync(getV2StateFilePath(slot), JSON.stringify(state, null, 2), 'utf-8')
+  } catch {}
+}
