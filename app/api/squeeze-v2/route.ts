@@ -427,6 +427,28 @@ export async function GET(req: NextRequest) {
       // dernière déjà vue — un seul nouveau point normalement entre deux
       // polls (15 min >> 10s), mais on boucle au cas où le service ait
       // été arrêté pendant plusieurs cycles.
+      // ★ CORRECTIF COLD-START — sans ça, un état jamais initialisé
+      // (lastBarTimeProcessed=0, premier démarrage ou volume perdu) fait
+      // traiter TOUTES les bougies de l'historique en une seule passe au
+      // prochain poll, pouvant déclencher des trades sur des setups vieux
+      // de plusieurs jours avec des prix obsolètes. On rattrape le retard
+      // SILENCIEUSEMENT à la dernière bougie clôturée, sans jamais
+      // détecter ni confirmer de trigger sur ce premier passage.
+      const isColdStart = state.lastBarTimeProcessed === 0
+      if (isColdStart) {
+        state.lastBarTimeProcessed = bars.at(-1)?.time ?? 0
+        state.pendingTrigger = null
+        saveV2DetectorState(state, slot)
+        slotSignals[slot] = {
+          action: 'STABLE',
+          reasons: ['Démarrage à froid — rattrapage silencieux, aucune détection sur ce passage.'],
+          vwap: bars.length ? computeVWAPAt(bars, bars.length - 1, VWAP_WINDOW) : 0,
+          dailyRegime: 'undefined',
+          pendingTrigger: null,
+        }
+        continue
+      }
+
       const startCalcIdx = PUMP_LOOKBACK + ATR_PERIOD + VWAP_WINDOW
       const firstNewIdx = bars.findIndex((b, idx) => idx >= startCalcIdx && b.time > state.lastBarTimeProcessed)
       const indices: number[] = firstNewIdx === -1 ? [] : bars.slice(firstNewIdx).map((_, k) => firstNewIdx + k)
