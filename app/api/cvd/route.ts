@@ -89,9 +89,18 @@ const oiBuffers: Record<SlotKey, OIBar[]> = {
   'ETH-1h': loadOIBuffer('ETH-1h'),
   'SOL-1h': loadOIBuffer('SOL-1h'),
   'XRP-1h': loadOIBuffer('XRP-1h'),
+  // Entrées mortes — jamais lues par ce moteur (v1, H1, 4 slots
+  // d'origine). Nécessaires uniquement pour satisfaire le type
+  // Record<SlotKey,...>, élargi par le déploiement du moteur v2
+  // (squeeze-v2/route.ts) qui a étendu l'union SlotKey dans store.ts.
+  'BTC-15m-v2': [],
+  'ETH-15m-v2': [],
+  'SOL-15m-v2': [],
 }
 const oiHistoryLoaded: Record<SlotKey, boolean> = {
   'BTC-1h': false, 'ETH-1h': false, 'SOL-1h': false, 'XRP-1h': false,
+  // Mêmes entrées mortes que ci-dessus, même raison.
+  'BTC-15m-v2': false, 'ETH-15m-v2': false, 'SOL-15m-v2': false,
 }
 
 // ─── HELPERS GÉNÉRIQUES (conservés depuis l'ancienne version) ──────────────
@@ -444,6 +453,12 @@ export async function GET(req: NextRequest) {
       'ETH-1h': { symbol: 'ETHUSDT', klines: ethKlines, ticker: ethTicker, funding: ethFunding },
       'SOL-1h': { symbol: 'SOLUSDT', klines: solKlines, ticker: solTicker, funding: solFunding },
       'XRP-1h': { symbol: 'XRPUSDT', klines: xrpKlines, ticker: xrpTicker, funding: xrpFunding },
+      // Entrées mortes — ce moteur (v1) ne traite que les 4 slots H1
+      // ci-dessus, jamais les slots v2. Nécessaires uniquement pour la
+      // complétude du type Record<SlotKey,...>.
+      'BTC-15m-v2': { symbol: 'BTCUSDT', klines: btcKlines, ticker: btcTicker, funding: btcFunding },
+      'ETH-15m-v2': { symbol: 'ETHUSDT', klines: ethKlines, ticker: ethTicker, funding: ethFunding },
+      'SOL-15m-v2': { symbol: 'SOLUSDT', klines: solKlines, ticker: solTicker, funding: solFunding },
     }
 
     const slotSignals: Record<SlotKey, SlotSignalResult> = {} as Record<SlotKey, SlotSignalResult>
