@@ -487,6 +487,26 @@ export async function GET(req: NextRequest) {
       // frontend, alors qu'une bougie H1 ne change qu'une fois par heure.
       // Sans cette garde, la confirmation VWAP (qui doit prendre 2 BOUGIES,
       // soit 2h) se déclencherait en quelques secondes au lieu de 2 heures.
+      // ★ CORRECTIF COLD-START — sans ça, un état jamais initialisé
+      // (lastBarTimeProcessed=0, premier démarrage ou volume perdu) fait
+      // traiter TOUTES les bougies de l'historique en une seule passe,
+      // pouvant déclencher des trades sur des prix obsolètes. On rattrape
+      // silencieusement à la dernière bougie clôturée, sans rien déclencher.
+      if (state.lastBarTimeProcessed === 0) {
+        state.lastBarTimeProcessed = bars.at(-1)?.time ?? 0
+        state.pendingTrigger = null
+        saveSqueezeState(state, slot)
+        slotSignals[slot] = {
+          action: 'STABLE',
+          reasons: ['Démarrage à froid — rattrapage silencieux, aucune détection sur ce passage.'],
+          vwap: bars.length ? computeRollingVWAPAt(bars, bars.length - 1, VWAP_WINDOW) : 0,
+          dailyRegime: regime.trendLabels.at(-1) ?? 'undefined',
+          pendingTrigger: null,
+          metrics: { priceVsVwapPct: 0, oiChangePct: 0, dominance: 0, fundingRate: funding.rate },
+        }
+        continue
+      }
+
       const startIdx = bars.findIndex(b => b.time > state.lastBarTimeProcessed)
       const indices: number[] = startIdx === -1 ? [] : bars.slice(startIdx).map((_, k) => startIdx + k)
 
