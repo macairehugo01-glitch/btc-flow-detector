@@ -13,128 +13,94 @@ import AnalyticsPanel from '../AnalyticsPanel'
 import { useMarketData } from '../useMarketData'
 import { useMarketStore } from '../useMarketStore'
 
-// ─────────────────────────────────────────────────────────────────────────
-// BLOC V2 — moteur cloche d'OI + VWAP + Dow theory, BTC/ETH/SOL en M15.
-// Autonome : son propre fetch + state, indépendant de useMarketData/
-// useMarketStore (logique v1, jamais étendue à v2). XRP absent par design.
-// ─────────────────────────────────────────────────────────────────────────
-
-type V2SlotSignal = {
-  action: 'BUY' | 'SELL' | 'STABLE'
-  reasons: string[]
-  vwap: number
-  dailyRegime: 'up' | 'down' | 'undefined'
-  pendingTrigger: { crossTime: number; direction: 'up' | 'down'; barsWaited: number; consecutiveCount: number } | null
-}
-
-type V2Position = {
-  setupId: string
+type Trade = {
+  id: string
   slot: string
   action: 'BUY' | 'SELL'
   entryPrice: number
   stopLoss: number
   takeProfit: number
-  openedAt: number
-  timeframe: string
-} | null
-
-type V2Response = {
-  slotSignals: Record<string, V2SlotSignal>
-  allPositions: Record<string, V2Position>
-  lastUpdate: number
-  engine: string
-  error?: string
+  status: 'open' | 'win' | 'loss'
+  rMultiple?: number
+  timestamp: number
 }
 
-const V2_POLL_MS = 10_000
+const V1_SLOTS = ['BTC-1h', 'ETH-1h', 'SOL-1h', 'XRP-1h']
 const V2_SLOTS = ['BTC-15m-v2', 'ETH-15m-v2', 'SOL-15m-v2']
 
-function v2RegimeColor(regime: string) {
-  if (regime === 'up') return '#2ed573'
-  if (regime === 'down') return '#ff4757'
-  return '#888'
+function statusColor(s: string) {
+  if (s === 'win') return '#2ed573'
+  if (s === 'loss') return '#ff4757'
+  return '#ffa502'
 }
 
-function v2ActionColor(action: string) {
-  if (action === 'BUY') return '#2ed573'
-  if (action === 'SELL') return '#ff4757'
-  return '#888'
-}
-
-function V2Block() {
-  const [data, setData] = useState<V2Response | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    async function poll() {
-      try {
-        const res = await fetch('/api/squeeze-v2', { cache: 'no-store' })
-        const json: V2Response = await res.json()
-        if (cancelled) return
-        if (json.error) setError(json.error)
-        else { setData(json); setError(null) }
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : 'Erreur réseau')
-      }
-    }
-    poll()
-    const interval = setInterval(poll, V2_POLL_MS)
-    return () => { cancelled = true; clearInterval(interval) }
-  }, [])
-
+function TradeTable({ title, trades }: { title: string; trades: Trade[] }) {
   return (
-    <div style={{ border: '1px solid var(--bg-border)', borderRadius: 10, padding: 16, background: 'var(--bg-card)', height: '100%' }}>
-      <div style={{ fontSize: 13, fontWeight: 'bold', marginBottom: 12, color: 'var(--text-primary)' }}>
-        Moteur V2 — Cloche d'OI + Dow theory (BTC/ETH/SOL, M15)
-      </div>
-
-      {error && <div style={{ fontSize: 12, color: '#ff4757', marginBottom: 8 }}>⚠ {error}</div>}
-      {!data && !error && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Chargement...</div>}
-
-      {data && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {V2_SLOTS.map(slot => {
-            const sig = data.slotSignals?.[slot]
-            const pos = data.allPositions?.[slot]
-            if (!sig) return null
-            return (
-              <div key={slot} style={{ borderTop: '1px solid var(--bg-border)', paddingTop: 8 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
-                  <span style={{ fontWeight: 'bold' }}>{slot}</span>
-                  <span style={{ color: v2RegimeColor(sig.dailyRegime) }}>régime : {sig.dailyRegime}</span>
-                </div>
-                <div style={{ fontSize: 12, color: v2ActionColor(sig.action) }}>{sig.action}</div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  {sig.reasons.map((r, i) => <div key={i}>{r}</div>)}
-                </div>
-                {sig.pendingTrigger && (
-                  <div style={{ fontSize: 11, color: '#ffa502', marginTop: 4 }}>
-                    Trigger {sig.pendingTrigger.direction === 'up' ? 'SELL' : 'BUY'} en attente —
-                    {' '}{sig.pendingTrigger.consecutiveCount}/2 confirmées,
-                    {' '}{sig.pendingTrigger.barsWaited}/8 bougies
-                  </div>
-                )}
-                {pos && (
-                  <div style={{ fontSize: 11, marginTop: 4, color: v2ActionColor(pos.action) }}>
-                    Position ouverte : {pos.action} @ {pos.entryPrice}
-                  </div>
-                )}
-              </div>
-            )
-          })}
-        </div>
+    <div style={{ border: '1px solid var(--bg-border)', borderRadius: 10, padding: 16, background: 'var(--bg-card)', flex: 1 }}>
+      <div style={{ fontSize: 13, fontWeight: 'bold', marginBottom: 12 }}>{title}</div>
+      {trades.length === 0 ? (
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Aucun trade encore.</div>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+          <thead>
+            <tr style={{ color: 'var(--text-muted)', borderBottom: '1px solid var(--bg-border)' }}>
+              <th style={{ textAlign: 'left', padding: '4px 6px' }}>Slot</th>
+              <th style={{ textAlign: 'left', padding: '4px 6px' }}>Action</th>
+              <th style={{ textAlign: 'right', padding: '4px 6px' }}>Entrée</th>
+              <th style={{ textAlign: 'right', padding: '4px 6px' }}>SL</th>
+              <th style={{ textAlign: 'right', padding: '4px 6px' }}>TP</th>
+              <th style={{ textAlign: 'center', padding: '4px 6px' }}>Statut</th>
+              <th style={{ textAlign: 'right', padding: '4px 6px' }}>R</th>
+              <th style={{ textAlign: 'right', padding: '4px 6px' }}>Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            {trades.map(t => (
+              <tr key={t.id} style={{ borderBottom: '1px solid var(--bg-border)' }}>
+                <td style={{ padding: '4px 6px' }}>{t.slot}</td>
+                <td style={{ padding: '4px 6px', color: t.action === 'BUY' ? '#2ed573' : '#ff4757' }}>{t.action}</td>
+                <td style={{ padding: '4px 6px', textAlign: 'right' }}>{t.entryPrice}</td>
+                <td style={{ padding: '4px 6px', textAlign: 'right', color: '#ff4757' }}>{t.stopLoss.toFixed(4)}</td>
+                <td style={{ padding: '4px 6px', textAlign: 'right', color: '#2ed573' }}>{t.takeProfit.toFixed(4)}</td>
+                <td style={{ padding: '4px 6px', textAlign: 'center', color: statusColor(t.status) }}>{t.status}</td>
+                <td style={{ padding: '4px 6px', textAlign: 'right', color: statusColor(t.status) }}>
+                  {t.rMultiple != null ? `${t.rMultiple > 0 ? '+' : ''}${t.rMultiple.toFixed(2)}R` : '—'}
+                </td>
+                <td style={{ padding: '4px 6px', textAlign: 'right', color: 'var(--text-muted)' }}>
+                  {new Date(t.timestamp).toLocaleString()}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </div>
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-
 export default function Page() {
   const { refresh } = useMarketData()
   const { error, isLoading, ticker, signal } = useMarketStore()
   const isReady = !isLoading && ticker !== null && signal !== null
+
+  const [v1Trades, setV1Trades] = useState<Trade[]>([])
+  const [v2Trades, setV2Trades] = useState<Trade[]>([])
+
+  useEffect(() => {
+    async function fetchTrades() {
+      try {
+        const res = await fetch('/api/cvd', { cache: 'no-store' })
+        const json = await res.json()
+        const all: Trade[] = json.setupHistory ?? []
+        setV1Trades(all.filter(t => V1_SLOTS.includes(t.slot)))
+        setV2Trades(all.filter(t => V2_SLOTS.includes(t.slot)))
+      } catch {}
+    }
+    fetchTrades()
+    const id = setInterval(fetchTrades, 30_000)
+    return () => clearInterval(id)
+  }, [])
+
   return (
     <main style={{ minHeight: '100vh', background: 'var(--bg-primary)' }}>
       <Header onRefresh={refresh} />
@@ -152,15 +118,7 @@ export default function Page() {
         {isReady && (
           <>
             <StatsBar />
-
-            {/* V1 et V2 côte à côte, en haut, pour comparer en un coup d'œil */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-              <TradeSignalPanel />
-              <V2Block />
-            </div>
-
             <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 320px', gap: 16, alignItems: 'start' }}>
-              {/* Colonne principale */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                 <PriceChart />
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
@@ -170,15 +128,20 @@ export default function Page() {
                 <SetupHistory />
                 <AnalyticsPanel />
               </div>
-              {/* Colonne droite */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <TradeSignalPanel />
                 <OIStatsPanel />
                 <ConditionsChecklist />
                 <SettingsPanel />
               </div>
             </div>
 
-            {/* Liens backtest */}
+            {/* Deux tableaux de trades côte à côte */}
+            <div style={{ display: 'flex', gap: 16, alignItems: 'start' }}>
+              <TradeTable title="Trades V1 — BTC/ETH/SOL/XRP (H1)" trades={v1Trades} />
+              <TradeTable title="Trades V2 — BTC/ETH/SOL (M15)" trades={v2Trades} />
+            </div>
+
             <div style={{ display: 'flex', gap: 12, justifyContent: 'center', paddingBottom: 24 }}>
               <a href="/backtest" style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid var(--bg-border)', background: 'var(--bg-card)', color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: 12, textDecoration: 'none' }}>
                 📊 Backtest simple
