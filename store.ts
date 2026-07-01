@@ -202,10 +202,15 @@ function escapeMarkdown(text: string): string {
 
 // ─── NOTIFICATIONS ───────────────────────────────────────────────────────────
 
+function engineLabel(slot: SlotKey): string {
+  return slot.includes('-v2') ? '🆕 V2 (Cloche OI / M15)' : '⚡ V1 (Squeeze / H1)'
+}
+
 async function notifyOpen(setup: StoredSetup) {
   try {
     await sendTelegramMessage(
 `📈 *NEW TRADE — ${setup.slot}*
+${engineLabel(setup.slot)}
 
 ${setup.action} ${setup.timeframe}
 
@@ -227,6 +232,7 @@ async function notifyClose(setup: StoredSetup) {
   try {
     await sendTelegramMessage(
 `📉 *TRADE CLOSED — ${setup.slot}*
+${engineLabel(setup.slot)}
 
 Result: ${setup.status.toUpperCase()}
 R: ${setup.rMultiple?.toFixed(2)}
