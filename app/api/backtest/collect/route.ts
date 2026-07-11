@@ -186,7 +186,12 @@ export async function GET(req: Request) {
   const tf = url.searchParams.get('tf') ?? '1h'
 
   // Validation
-  const allowedSymbols = ['BTCUSDT', 'ETHUSDT', 'XRPUSDT', 'SOLUSDT', 'DOGEUSDT', 'OPUSDT', 'ARBUSDT', 'ADAUSDT', 'XRPUSDT', 'SUIUSDT', 'AVAXUSDT', 'AAVEUSDT', 'LINKUSDT', 'UNISUSDT', 'BNBUSDT', 'HYPEUSDT']
+  const allowedSymbols = [
+    'BTCUSDT', 'ETHUSDT', 'XRPUSDT', 'SOLUSDT',
+    'DOGEUSDT', 'OPUSDT', 'ARBUSDT', 'ADAUSDT',
+    'SUIUSDT', 'AVAXUSDT', 'AAVEUSDT', 'LINKUSDT',
+    'UNIUSDT', 'BNBUSDT', 'HYPEUSDT',
+  ]
   if (!allowedSymbols.includes(symbol)) {
     return NextResponse.json({ error: `Symbole non supporté: ${symbol}` }, { status: 400 })
   }
