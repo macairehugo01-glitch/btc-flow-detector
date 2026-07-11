@@ -7,12 +7,11 @@ const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || '/data'
 
 type RawBar = { time:number; open:number; high:number; low:number; close:number; volume:number }
 
-// Seuils de récupération mesurés
-const RECOVERY_THRESHOLDS = [0.5, 1, 2, 3, 5, 10]
+// Seuils de récupération mesurés (poussés jusqu'à 20% pour capter les gros V-shapes)
+const RECOVERY_THRESHOLDS = [0.5, 1, 2, 3, 5, 10, 15, 20]
 
-// Horizons fixes mesurés (en bougies M15, exprimés ensuite en multi-TF)
-// 4 = 1h | 16 = 4h | 32 = 8h | 96 = 24h | 192 = 48h | 288 = 72h
-const HORIZONS_M15 = [4, 16, 32, 96, 192, 288]
+// Horizons fixes mesurés en heures réelles : 1h, 4h, 8h, 24h, 48h, 72h (3j), 168h (1sem), 336h (2sem), 720h (1mois)
+const HORIZONS_HOURS = [1, 4, 8, 24, 48, 72, 168, 336, 720]
 
 type TimeMultiFrame = {
   m15: number | null
@@ -27,11 +26,11 @@ type Episode = {
   endReason: 'volume_exhaustion' | 'bullish_reversal' | 'max_bars'
   maxRvol: number; totalDumpPct: number
   hour: number; dayOfWeek: number
-  // Recovery % à chaque horizon fixe
-  recoveryAtHorizon: Record<number, number>   // key = M15 bars
-  // Max recovery sur 288 bougies
-  maxRecovery288: number
-  // Temps pour atteindre chaque seuil (null = jamais dans les 288 bars)
+  // Recovery % à chaque horizon fixe (clé = heures)
+  recoveryAtHorizon: Record<number, number>
+  // Max recovery global sur toute la fenêtre étendue
+  maxRecoveryExtended: number
+  // Temps pour atteindre chaque seuil (null = jamais dans la fenêtre max)
   barsTo: Record<number, number | null>        // key = % seuil
 }
 
@@ -59,23 +58,24 @@ function computeStats(episodes: Episode[]) {
   if (!episodes.length) return null
   const n = episodes.length
 
-  // % de fois que le prix remonte de X% (depuis le plus bas)
   const recoveryRate: Record<string, number> = {}
   for (const thr of RECOVERY_THRESHOLDS) {
     recoveryRate[`reach_${thr}pct`] = pct(episodes.map(e => (e.barsTo[thr] ?? null) !== null))
   }
 
-  // Temps médian pour atteindre chaque seuil, exprimé en 4 timeframes
   const timeToRecover: Record<string, TimeMultiFrame> = {}
   for (const thr of RECOVERY_THRESHOLDS) {
     timeToRecover[`median_to_${thr}pct`] = toMultiFrame(med(episodes.map(e => e.barsTo[thr] ?? null)))
   }
 
-  // % recovery à chaque horizon fixe
   const recoveryAtHorizon: Record<string, { label:string; avgRecoveryPct:number; pctPositive:number }> = {}
-  for (const h of HORIZONS_M15) {
+  for (const h of HORIZONS_HOURS) {
     const vals = episodes.map(e => e.recoveryAtHorizon[h] ?? 0)
-    const label = h===4?'1h' : h===16?'4h' : h===32?'8h' : h===96?'24h' : h===192?'48h' : '72h'
+    let label = `${h}h`
+    if (h === 168) label = '1w'
+    if (h === 336) label = '2w'
+    if (h === 720) label = '1m'
+    
     recoveryAtHorizon[label] = {
       label,
       avgRecoveryPct: r(avg(vals)),
@@ -85,17 +85,14 @@ function computeStats(episodes: Episode[]) {
 
   return {
     count: n,
-    episodesPerYear: null as number | null,  // rempli plus bas
+    episodesPerYear: null as number | null,
     avgDuration: r(avg(episodes.map(e=>e.duration)), 2),
     avgMaxRvol: r(avg(episodes.map(e=>e.maxRvol)), 2),
     avgTotalDump: r(avg(episodes.map(e=>e.totalDumpPct)), 4),
     pctEndByExhaustion: r(episodes.filter(e=>e.endReason==='volume_exhaustion').length/n*100, 1),
-    avgMaxRecovery288: r(avg(episodes.map(e=>e.maxRecovery288))),
-    // Combien de % de fois ça remonte de X%
+    avgMaxRecoveryMaxWindow: r(avg(episodes.map(e=>e.maxRecoveryExtended))),
     recoveryRate,
-    // En combien de bougies (M15 / H1 / H4 / Daily)
     timeToRecover,
-    // % recovery moyen à chaque horizon temporel
     recoveryAtHorizon,
   }
 }
@@ -114,7 +111,16 @@ function group(episodes:Episode[], fn:(e:Episode)=>string, years:number) {
   )
 }
 
-function rvolLabel(v:number):string { if(v<2)return '1.5-2x'; if(v<3)return '2-3x'; if(v<5)return '3-5x'; if(v<10)return '5-10x'; return '>10x' }
+// Segmentation fine des tranches RVOL pour traquer la frontière du chaos jusqu'à x20+
+function rvolLabel(v:number):string { 
+  if(v<2)return '1.5-2x'; 
+  if(v<3)return '2-3x'; 
+  if(v<5)return '3-5x'; 
+  if(v<8)return '5-8x'; 
+  if(v<12)return '8-12x'; 
+  if(v<20)return '12-20x'; 
+  return '>20x' 
+}
 function dumpLabel(p:number):string { if(p<1)return '<1%'; if(p<2)return '1-2%'; if(p<3)return '2-3%'; if(p<5)return '3-5%'; return '>5%' }
 function durLabel(d:number):string { if(d===1)return '1 bar'; if(d<=3)return '2-3 bars'; if(d<=6)return '4-6 bars'; return '>6 bars' }
 function sesLabel(h:number):string { if(h<7)return 'Asia (00-07h)'; if(h<13)return 'London (07-13h)'; return 'NewYork (13-23h)' }
@@ -129,9 +135,6 @@ export async function GET(req:Request) {
   const rvolWindow = Number(url.searchParams.get('rvolWindow') ?? 20)
   const maxEpisodeBars = Number(url.searchParams.get('maxEpisodeBars') ?? 30)
 
-  // Le backtest est conçu pour tourner sur des données M15.
-  // Les temps de récupération sont toujours exprimés en M15/H1/H4/Daily
-  // quel que soit le tf des données source, pour faciliter la comparaison.
   const FILE = path.join(DATA_DIR, `backtest-history-${symbol.toLowerCase()}-${tf}.json`)
   if (!fs.existsSync(FILE)) {
     return NextResponse.json(
@@ -142,8 +145,12 @@ export async function GET(req:Request) {
 
   const bars: RawBar[] = JSON.parse(fs.readFileSync(FILE, 'utf-8'))
   const barMinutes = tf==='15m'?15 : tf==='1h'?60 : tf==='4h'?240 : tf==='1d'?1440 : 15
-  // Fenêtre de récupération en nombre de bougies (toujours 72h en temps réel)
-  const RECOVERY_WINDOW = Math.round(72 * 60 / barMinutes)
+  
+  // Configuration dynamique de la fenêtre d'observation selon l'UT :
+  // Si UT >= 1d -> Horizon poussé à 30 jours (720h) pour analyser les structures macro.
+  // Si UT < 1d  -> Horizon poussé à 2 semaines (336h) pour capturer les flux intra-day profonds.
+  const maxHorizonHours = barMinutes >= 1440 ? 720 : 336
+  const RECOVERY_WINDOW = Math.round(maxHorizonHours * 60 / barMinutes)
   const episodes: Episode[] = []
 
   let i = rvolWindow
@@ -158,7 +165,6 @@ export async function GET(req:Request) {
 
     if (bar.close>=bar.open || bodyPct<bodyMinPct || rvol<rvolMin) { i++; continue }
 
-    // ── Construction de l'épisode ──────────────────────────────────────
     const startIdx = i; const startOpen = bar.open
     let lowestClose=bar.close, lowestIdx=i
     let maxRvol=rvol, sumRvol=rvol, bearishCount=1
@@ -178,21 +184,17 @@ export async function GET(req:Request) {
     }
     if (endReason==='max_bars') endIdx=j-1
 
-    // ── Mesure de récupération depuis le PLUS BAS ──────────────────────
     const ref = lowestClose
     const a = lowestIdx+1
 
-    // Recovery % à chaque horizon fixe
-    // On convertit les horizons M15 en nombre de bougies pour ce TF
+    // Calcul de la performance aux horizons étendus (exprimés en heures réelles)
     const recoveryAtHorizon: Record<number,number> = {}
-    for (const hM15 of HORIZONS_M15) {
-      // Convertit l'horizon M15 en bougies du TF courant
-      const hBars = Math.round(hM15 * 15 / barMinutes)
+    for (const hHours of HORIZONS_HOURS) {
+      const hBars = Math.round(hHours * 60 / barMinutes)
       const idx = a + hBars - 1
-      recoveryAtHorizon[hM15] = idx<bars.length ? r(((bars[idx].close-ref)/ref)*100) : 0
+      recoveryAtHorizon[hHours] = idx<bars.length ? r(((bars[idx].close-ref)/ref)*100) : 0
     }
 
-    // Scan de la fenêtre de récupération
     let maxRec=0
     const barsTo: Record<number,number|null> = {}
     for (const thr of RECOVERY_THRESHOLDS) barsTo[thr]=null
@@ -200,7 +202,8 @@ export async function GET(req:Request) {
     for (let k=1; k<=RECOVERY_WINDOW && a+k-1<bars.length; k++) {
       const hp = ((bars[a+k-1].high-ref)/ref)*100
       if (hp>maxRec) maxRec=hp
-      // On convertit k (bougies du TF courant) en équivalent M15 pour normaliser
+      
+      // Normalisation systématique en équivalent bougies M15 pour garder des métriques cohérentes
       const kM15 = k * barMinutes / 15
       for (const thr of RECOVERY_THRESHOLDS) {
         if (barsTo[thr]===null && hp>=thr) barsTo[thr]=kM15
@@ -214,7 +217,7 @@ export async function GET(req:Request) {
       maxRvol: r(maxRvol,2),
       totalDumpPct: r(((startOpen-lowestClose)/startOpen)*100,4),
       hour: d.getUTCHours(), dayOfWeek: d.getUTCDay(),
-      recoveryAtHorizon, maxRecovery288: r(maxRec), barsTo,
+      recoveryAtHorizon, maxRecoveryExtended: r(maxRec), barsTo,
     })
 
     i = endIdx+1
@@ -231,56 +234,33 @@ export async function GET(req:Request) {
     totalBars: bars.length, yearsOfData: r(years,2),
     totalEpisodes: episodes.length,
     episodesPerYear: r(episodes.length/years,1),
-    // Légende des horizons temporels
-    horizons: {
-      '1h':'4 bougies M15 | 1 bougie H1',
-      '4h':'16 bougies M15 | 4 bougies H1 | 1 bougie H4',
-      '8h':'32 bougies M15 | 8 bougies H1 | 2 bougies H4',
-      '24h':'96 bougies M15 | 24 bougies H1 | 6 bougies H4 | 1 bougie Daily',
-      '48h':'192 bougies M15 | 48 bougies H1 | 12 bougies H4 | 2 bougies Daily',
-      '72h':'288 bougies M15 | 72 bougies H1 | 18 bougies H4 | 3 bougies Daily',
-    },
-    endReasons: {
-      volume_exhaustion: episodes.filter(e=>e.endReason==='volume_exhaustion').length,
-      bullish_reversal:  episodes.filter(e=>e.endReason==='bullish_reversal').length,
-      max_bars:          episodes.filter(e=>e.endReason==='max_bars').length,
-    },
-    // ── VUE GLOBALE ──────────────────────────────────────────────────────
-    // recoveryRate   : % de fois que le prix remonte de X% dans les 72h
-    // timeToRecover  : en combien de bougies (M15/H1/H4/Daily) en médiane
-    // recoveryAtHorizon : % recovery moyen à chaque horizon temporel
+    maxHorizonObserved: `${maxHorizonHours} heures`,
     overall,
-    // ── PAR RVOL ─────────────────────────────────────────────────────────
-    // Question : est-ce que les dumps plus violents rebondissent MIEUX ?
     byRvol: group(episodes, e=>rvolLabel(e.maxRvol), years),
-    // ── PAR AMPLITUDE DU DUMP ─────────────────────────────────────────────
     byDump: group(episodes, e=>dumpLabel(e.totalDumpPct), years),
-    // ── PAR DURÉE DE L'ÉPISODE ───────────────────────────────────────────
     byDuration: group(episodes, e=>durLabel(e.duration), years),
-    // ── PAR SESSION ──────────────────────────────────────────────────────
     bySession: group(episodes, e=>sesLabel(e.hour), years),
-    // ── PAR JOUR DE LA SEMAINE ───────────────────────────────────────────
     byDayOfWeek: group(episodes, e=>dayLabel(e.dayOfWeek), years),
-    // ── CROISÉ RVOL × DUMP ───────────────────────────────────────────────
     byRvolXDump: group(episodes, e=>`RVOL ${rvolLabel(e.maxRvol)} + dump ${dumpLabel(e.totalDumpPct)}`, years),
-    // ── TOP 15 ÉPISODES LES PLUS VIOLENTS ────────────────────────────────
     topByRvol: episodes
       .sort((a,b)=>b.maxRvol-a.maxRvol).slice(0,15)
       .map(e=>({
         date: new Date(e.startTime*1000).toISOString(),
         duration: e.duration, endReason: e.endReason,
         maxRvol: e.maxRvol, totalDumpPct: e.totalDumpPct,
-        maxRecovery72h: e.maxRecovery288,
+        maxRecoveryInWindow: e.maxRecoveryExtended,
         reachedIn: {
           '1pct': toMultiFrame(e.barsTo[1]),
-          '2pct': toMultiFrame(e.barsTo[2]),
           '5pct': toMultiFrame(e.barsTo[5]),
+          '10pct': toMultiFrame(e.barsTo[10]),
+          '20pct': toMultiFrame(e.barsTo[20]),
         },
         recoveryAt: {
-          '1h':  e.recoveryAtHorizon[4],
-          '4h':  e.recoveryAtHorizon[16],
-          '24h': e.recoveryAtHorizon[96],
-          '72h': e.recoveryAtHorizon[288],
+          '1h':  e.recoveryAtHorizon[1],
+          '24h': e.recoveryAtHorizon[24],
+          '72h': e.recoveryAtHorizon[72],
+          '1w':  e.recoveryAtHorizon[168],
+          '2w':  e.recoveryAtHorizon[336],
         }
       })),
   })
