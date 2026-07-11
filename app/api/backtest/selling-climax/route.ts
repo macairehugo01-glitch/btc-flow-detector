@@ -285,13 +285,3 @@ export async function GET(req:Request) {
       })),
   })
 }
-
-function toMultiFrame(bars_m15:number|null) {
-  if (bars_m15===null) return { m15:null, h1:null, h4:null, d1:null }
-  return {
-    m15: bars_m15,
-    h1:  Math.round(bars_m15/4*10)/10,
-    h4:  Math.round(bars_m15/16*10)/10,
-    d1:  Math.round(bars_m15/96*100)/100,
-  }
-}
