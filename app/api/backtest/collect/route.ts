@@ -103,19 +103,18 @@ async function fetchKlinesPaginated(symbol: string, interval: string, targetBars
     .slice(-targetBars)
 }
 
-// ─── OPEN INTEREST paginé ─────────────────────────────────────────────────────
+// ─── OI paginé ───────────────────────────────────────────────────────────────
 async function fetchOIPaginated(symbol: string, oiInterval: string, targetBars: number): Promise<{ time: number; oi: number }[]> {
   const allOI: { time: number; oi: number }[] = []
-  let cursor: string | null = null
+  let endTime = Date.now()
+  const maxCalls = Math.ceil(targetBars / OI_BARS_PER_CALL)
   let callCount = 0
-  const maxCalls = Math.ceil(targetBars / OI_BARS_PER_CALL) + 5
 
   while (allOI.length < targetBars && callCount < maxCalls) {
-    let u = `${BYBIT}/v5/market/open-interest?category=linear&symbol=${symbol}&intervalTime=${oiInterval}&limit=${OI_BARS_PER_CALL}`
-    if (cursor) u += `&cursor=${encodeURIComponent(cursor)}`
-    const data = await fetchWithRetry(u)
+    const url = `${BYBIT}/v5/market/open-interest?category=linear&symbol=${symbol}&intervalTime=${oiInterval}&limit=${OI_BARS_PER_CALL}&endTime=${endTime}`
+    const data = await fetchWithRetry(url)
     if (!data || !data.result?.list?.length) {
-      console.log(`[BACKTEST] OI ${symbol}: arrêt à ${allOI.length}/${targetBars} points (appel ${callCount + 1})`)
+      console.log(`[BACKTEST] OI ${symbol}: arrêt à ${allOI.length}/${targetBars} points (appel ${callCount + 1}/${maxCalls})`)
       break
     }
 
@@ -123,10 +122,11 @@ async function fetchOIPaginated(symbol: string, oiInterval: string, targetBars: 
       time: Math.floor(Number(d.timestamp) / 1000),
       oi: Number(d.openInterest),
     }))
-    allOI.unshift(...bars)
 
-    cursor = data.result.nextPageCursor ?? null
-    if (!cursor) break
+    allOI.unshift(...bars)
+    const oldest = bars[0]
+    if (!oldest) break
+    endTime = oldest.time * 1000 - 1
     callCount++
     await new Promise(r => setTimeout(r, 250))
   }
